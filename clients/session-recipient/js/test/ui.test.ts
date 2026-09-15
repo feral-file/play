@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { PlayError } from "../src/errors.js";
 import {
   clearStoredEphemeralBrowserSession,
   defaultPairingCodeDialogCopy,
@@ -204,7 +205,13 @@ describe("pairing UI copy", () => {
   });
 
   it("maps broker and approval failures to bounded user-facing messages", () => {
-    expect(pairingErrorMessage(new Error("short-code resolution failed: 404"))).toContain("Pairing code not found");
+    // An expired code reads 404 from the broker, which drops it from its
+    // index on expiry; the person typing it must be told to get a new one.
+    expect(pairingErrorMessage(new Error("short-code resolution failed: 404"))).toContain("no longer valid");
+    expect(pairingErrorMessage(new Error("short-code resolution failed: 404"))).toContain("enter the new code");
+    expect(pairingErrorMessage(new PlayError("short-code resolution failed: 404", "pairing_code_not_found"))).toContain(
+      "no longer valid"
+    );
     expect(pairingErrorMessage(new Error("short-code resolution failed: 410"))).toContain("Pairing code expired");
     expect(pairingErrorMessage(new Error("channel join failed: 401"))).toContain("already used");
     expect(pairingErrorMessage(new Error("mint request rejected"))).toBe("The browser session was not approved in Feral File.");

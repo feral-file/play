@@ -130,8 +130,11 @@ export const defaultPairingCodeDialogCopy: PairingCodeDialogCopy = {
 export function pairingErrorMessage(error: unknown): string {
   if (error instanceof PlayError && error.code !== undefined) {
     switch (error.code) {
+      // The broker drops a code from its index the moment its channel expires
+      // or closes, so an expired code answers 404, not 410. To the person
+      // typing it, "not found" is the same event as "expired": say that.
       case "pairing_code_not_found":
-        return "Pairing code not found on this broker. Turn Browser Pairing on again and enter the latest code.";
+        return "This pairing code is no longer valid. Codes expire after a few minutes, so turn Browser Pairing on again and enter the new code.";
       case "pairing_code_expired":
         return "Pairing code expired. Turn Browser Pairing on again and enter the new code.";
       case "pairing_code_used":
@@ -148,7 +151,7 @@ export function pairingErrorMessage(error: unknown): string {
   }
   const raw = error instanceof Error ? error.message : "request failed";
   if (raw === "short-code resolution failed: 404") {
-    return "Pairing code not found on this broker. Turn Browser Pairing on again and enter the latest code.";
+    return "This pairing code is no longer valid. Codes expire after a few minutes, so turn Browser Pairing on again and enter the new code.";
   }
   if (raw === "short-code resolution failed: 410") {
     return "Pairing code expired. Turn Browser Pairing on again and enter the new code.";
