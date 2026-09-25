@@ -27,6 +27,15 @@
               autocomplete="off"
             />
           </label>
+          <label class="block">
+            <span class="mb-2 block text-sm font-semibold text-neutral-300">App link base URL</span>
+            <input
+              id="app-link-base-url"
+              class="h-11 w-full rounded-md border border-neutral-800 bg-neutral-900 px-3 font-mono text-sm text-neutral-100 outline-none transition focus:border-red-400 focus:ring-2 focus:ring-red-500/20"
+              value="https://link.feralfile.com/pair"
+              autocomplete="off"
+            />
+          </label>
         </div>
 
         <label class="flex min-h-[420px] flex-1 flex-col">
@@ -70,6 +79,7 @@
       } from "@feralfile/play";
 
       const brokerUrlInput = mustElement("broker-url");
+      const appLinkBaseUrlInput = mustElement("app-link-base-url");
       const dp1PayloadInput = mustElement("dp1-payload");
       const forgetButton = mustElement("forget-session");
       const sessionStatus = mustElement("session-status");
@@ -99,26 +109,46 @@
         }
       }
 
-      mountPlayOnArtComputerButton({
-        container: "#play-button-container",
-        playlist: dp1Payload,
-        brokerBaseUrl: () => brokerUrlInput.value.trim(),
-        // Fallback when the session carries no relayer URL; the host from Network endpoints.
-        relayerBaseUrl: "https://tv-cast-coordination.autonomy-system.workers.dev",
-        browserInfo: {
-          name: navigator.userAgent.includes("Chrome") ? "Chrome" : "Browser",
-          userAgent: navigator.userAgent,
-          label: document.title
-        },
-        pollIntervalMs: 2000,
-        maxWaitMs: 300000,
-        onStatusChange: (value) => {
-          setMessage(value);
-          updateSessionStatus();
-        },
-        onSuccess: updateSessionStatus,
-        onError: updateSessionStatus
+      let playButton;
+
+      function mountPlayButton() {
+        const previous = playButton;
+        // Mount first: an invalid app link base URL throws here and leaves the
+        // current button in place.
+        playButton = mountPlayOnArtComputerButton({
+          container: "#play-button-container",
+          playlist: dp1Payload,
+          brokerBaseUrl: () => brokerUrlInput.value.trim(),
+          appLinkBaseUrl: appLinkBaseUrlInput.value.trim(),
+          // Fallback when the session carries no relayer URL; the host from Network endpoints.
+          relayerBaseUrl: "https://tv-cast-coordination.autonomy-system.workers.dev",
+          browserInfo: {
+            name: navigator.userAgent.includes("Chrome") ? "Chrome" : "Browser",
+            userAgent: navigator.userAgent,
+            label: document.title
+          },
+          maxWaitMs: 300000,
+          onStatusChange: (value) => {
+            setMessage(value);
+            updateSessionStatus();
+          },
+          onSuccess: updateSessionStatus,
+          onError: updateSessionStatus
+        });
+        previous?.destroy();
+      }
+
+      // The app link base URL is fixed when the button mounts, so remount on change.
+      appLinkBaseUrlInput.addEventListener("change", () => {
+        try {
+          mountPlayButton();
+          setMessage("App link base URL updated.");
+        } catch (error) {
+          setMessage(error instanceof Error ? error.message : "Invalid app link base URL.");
+        }
       });
+
+      mountPlayButton();
 
       forgetButton.addEventListener("click", () => {
         clearStoredEphemeralBrowserSession(localStorage, window.location.origin);
