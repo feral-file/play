@@ -646,34 +646,29 @@ func (b *Broker) handleJoinChannel(w http.ResponseWriter, r *http.Request, chann
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if !validJSONObject(req.BrowserPublicKeyJWK, maxPublicKeyJWKBytes) || !validJoinCredential(req) {
-		writeError(w, http.StatusBadRequest, "invalid_request")
-		return
-	}
-	if !validOptionalOrigin(req.Origin) || !validOptionalJSONObject(req.BrowserInfo, maxBrowserInfoBytes) {
+	if !validJoinCredential(req) || !validJoinFieldShapes(req) {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
 
-	browserToken, err := randomToken("bt_", 32)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "invalid_request")
-		return
-	}
 	now := b.now().UTC()
 	var response JoinChannelResponse
 	var status int
 	var code string
-	err = b.db.Update(func(tx *bolt.Tx) error {
-		channel, metaBucket, participantsBucket, _, ok := channelBuckets(tx, channelID)
+	err := b.db.Update(func(tx *bolt.Tx) error {
+		_, metaBucket, participantsBucket, _, ok := channelBuckets(tx, channelID)
 		if !ok {
 			status, code = http.StatusNotFound, "not_found"
 			return nil
 		}
-		_ = channel
 		record, err := loadChannelRecord(metaBucket)
 		if err != nil {
 			return err
+		}
+		joinerRole := oppositeRole(channelCreatorRole(record))
+		if !joinFieldsMatchRole(req, joinerRole) {
+			status, code = http.StatusBadRequest, "invalid_request"
+			return nil
 		}
 		expired, err := markExpiredIfNeeded(tx, metaBucket, &record, now)
 		if err != nil {
@@ -713,24 +708,32 @@ func (b *Broker) handleJoinChannel(w http.ResponseWriter, r *http.Request, chann
 			status, code = http.StatusUnauthorized, "unauthorized"
 			return nil
 		}
-		if participantsBucket.Get([]byte(roleBrowser)) != nil {
+		if participantsBucket.Get([]byte(joinerRole)) != nil {
 			status, code = http.StatusUnauthorized, "unauthorized"
 			return nil
+		}
+		joinerToken, err := participantToken(joinerRole)
+		if err != nil {
+			return err
 		}
 		record.Status = statusPaired
 		record.PairedAt = formatTime(now)
 		record.PairingConsumedAt = formatTime(now)
-		record.BrowserPublicKeyJWK = cloneRaw(req.BrowserPublicKeyJWK)
+		if joinerRole == roleBrowser {
+			record.BrowserPublicKeyJWK = cloneRaw(req.BrowserPublicKeyJWK)
+		} else {
+			record.MinterPublicKeyJWK = cloneRaw(req.MinterPublicKeyJWK)
+		}
 		if err := putJSON(metaBucket, []byte(recordKey), record); err != nil {
 			return err
 		}
-		browser := ParticipantRecord{
+		joiner := ParticipantRecord{
 			ChannelID: channelID,
-			Role:      roleBrowser,
-			TokenHash: hashString(browserToken),
+			Role:      joinerRole,
+			TokenHash: hashString(joinerToken),
 			CreatedAt: formatTime(now),
 		}
-		if err := putJSON(participantsBucket, []byte(roleBrowser), browser); err != nil {
+		if err := putJSON(participantsBucket, []byte(joinerRole), joiner); err != nil {
 			return err
 		}
 		if err := tx.Bucket([]byte(bucketPairingTokens)).Delete([]byte(record.PairingTokenHash)); err != nil {
@@ -747,12 +750,20 @@ func (b *Broker) handleJoinChannel(w http.ResponseWriter, r *http.Request, chann
 			}
 		}
 		response = JoinChannelResponse{
-			ChannelID:          channelID,
-			BrowserToken:       browserToken,
-			Algorithm:          record.Algorithm,
-			MinterPublicKeyJWK: cloneRaw(record.MinterPublicKeyJWK),
-			ExpiresAt:          record.ExpiresAt,
-			NextSeq:            1,
+			ChannelID: channelID,
+			Role:      joinerRole,
+			Algorithm: record.Algorithm,
+			ExpiresAt: record.ExpiresAt,
+			NextSeq:   1,
+		}
+		if joinerRole == roleBrowser {
+			response.BrowserToken = joinerToken
+			response.MinterPublicKeyJWK = cloneRaw(record.MinterPublicKeyJWK)
+		} else {
+			response.MinterToken = joinerToken
+			response.BrowserPublicKeyJWK = cloneRaw(record.BrowserPublicKeyJWK)
+			response.Origin = record.Origin
+			response.BrowserInfo = cloneRaw(record.BrowserInfo)
 		}
 		return nil
 	})
@@ -837,11 +848,19 @@ func (b *Broker) handleResolvePairingCode(w http.ResponseWriter, r *http.Request
 		if err := tx.Bucket([]byte(bucketShortCodeAttempts)).Delete([]byte(attemptKey)); err != nil {
 			return err
 		}
+		creatorRole := channelCreatorRole(record)
 		response = ResolvePairingCodeResponse{
-			ChannelID:          channelID,
-			Algorithm:          record.Algorithm,
-			MinterPublicKeyJWK: cloneRaw(record.MinterPublicKeyJWK),
-			ExpiresAt:          record.ExpiresAt,
+			ChannelID:   channelID,
+			CreatorRole: creatorRole,
+			Algorithm:   record.Algorithm,
+			ExpiresAt:   record.ExpiresAt,
+		}
+		if creatorRole == roleBrowser {
+			response.BrowserPublicKeyJWK = cloneRaw(record.BrowserPublicKeyJWK)
+			response.Origin = record.Origin
+			response.BrowserInfo = cloneRaw(record.BrowserInfo)
+		} else {
+			response.MinterPublicKeyJWK = cloneRaw(record.MinterPublicKeyJWK)
 		}
 		return nil
 	})
@@ -1038,7 +1057,9 @@ func (b *Broker) handlePollMessages(w http.ResponseWriter, r *http.Request, chan
 		}
 		response = PollMessagesResponse{
 			ChannelID: channelID,
+			Status:    record.Status,
 			ExpiresAt: record.ExpiresAt,
+			Peer:      channelPeer(participantsBucket, record, oppositeRole(role)),
 			Messages:  make([]MessageRecord, 0),
 		}
 		cursor := messagesBucket.Cursor()
@@ -1278,6 +1299,34 @@ func validJoinCredential(req JoinChannelRequest) bool {
 	return validShortCode(req.ShortCode)
 }
 
+// validJoinFieldShapes checks the size and shape of every join field that is
+// present. Which fields a join must carry depends on the channel's creator role
+// and is checked against the stored record by joinFieldsMatchRole.
+func validJoinFieldShapes(req JoinChannelRequest) bool {
+	if rawPresent(req.BrowserPublicKeyJWK) && !validJSONObject(req.BrowserPublicKeyJWK, maxPublicKeyJWKBytes) {
+		return false
+	}
+	if rawPresent(req.MinterPublicKeyJWK) && !validJSONObject(req.MinterPublicKeyJWK, maxPublicKeyJWKBytes) {
+		return false
+	}
+	if rawPresent(req.BrowserPublicKeyJWK) == rawPresent(req.MinterPublicKeyJWK) {
+		return false
+	}
+	return validOptionalOrigin(req.Origin) && validOptionalJSONObject(req.BrowserInfo, maxBrowserInfoBytes)
+}
+
+// joinFieldsMatchRole reports whether a join request carries exactly the key
+// field of the joining role. A browser joining a minter-created channel sends
+// browserPublicKeyJwk (plus optional origin and browserInfo, as today); a
+// minter joining a browser-created channel sends only minterPublicKeyJwk,
+// because the browser's key, origin and metadata were fixed at create.
+func joinFieldsMatchRole(req JoinChannelRequest, joinerRole string) bool {
+	if joinerRole == roleBrowser {
+		return rawPresent(req.BrowserPublicKeyJWK) && !rawPresent(req.MinterPublicKeyJWK)
+	}
+	return rawPresent(req.MinterPublicKeyJWK) && !rawPresent(req.BrowserPublicKeyJWK) && req.Origin == "" && !rawPresent(req.BrowserInfo)
+}
+
 // validAttestedOrigin accepts a serialized web origin as browsers send it in
 // the Origin header: http or https scheme and host, no path, query, fragment or
 // credentials. The opaque origin "null" is rejected.
@@ -1311,6 +1360,22 @@ func channelCreatorRole(record ChannelRecord) string {
 		return roleBrowser
 	}
 	return roleMinter
+}
+
+// channelPeer returns the given peer role's public key once that participant
+// has joined, or nil.
+func channelPeer(participants *bolt.Bucket, record ChannelRecord, peerRole string) *PeerInfo {
+	if participants.Get([]byte(peerRole)) == nil {
+		return nil
+	}
+	key := record.MinterPublicKeyJWK
+	if peerRole == roleBrowser {
+		key = record.BrowserPublicKeyJWK
+	}
+	if !rawPresent(key) {
+		return nil
+	}
+	return &PeerInfo{Role: peerRole, PublicKeyJWK: cloneRaw(key)}
 }
 
 // rawPresent treats an absent field and an explicit JSON null as not present.
