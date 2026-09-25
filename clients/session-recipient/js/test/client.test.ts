@@ -499,6 +499,76 @@ describe("requestEphemeralSession", () => {
     expect(broker.channels).toHaveLength(1);
   });
 
+  it("times out with approval_timeout when the mint_request POST never resolves", async () => {
+    const broker = await fakeBroker();
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      if (init?.method === "POST" && requestUrl(input).endsWith("/messages")) {
+        return new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => {
+            reject(new DOMException("aborted", "AbortError"));
+          });
+        });
+      }
+      return broker.fetchImpl(input, init);
+    });
+    const error = await captureError(requestEphemeralSession(baseOptions(fetchImpl, { maxWaitMs: 30 })));
+    expect((error as PlayError).code).toBe("approval_timeout");
+    expectNoSecrets(error);
+  });
+
+  it("treats a 410 on the mint_request POST as channel expiry", async () => {
+    const broker = await fakeBroker();
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      if (init?.method === "POST" && requestUrl(input).endsWith("/messages")) {
+        return Promise.resolve(jsonResponse({ error: "expired" }, 410));
+      }
+      return broker.fetchImpl(input, init);
+    });
+    const error = await captureError(requestEphemeralSession(baseOptions(fetchImpl)));
+    expect((error as PlayError).code).toBe("pairing_code_expired");
+    expectNoSecrets(error);
+    expect(broker.closed).toEqual(["ch_1"]);
+  });
+
+  it("regenerates when the channel expires between the peer joining and the request landing", async () => {
+    const broker = await fakeBroker();
+    let sends = 0;
+    const materials: PairingMaterial[] = [];
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      if (init?.method === "POST" && requestUrl(input).endsWith("/messages")) {
+        sends += 1;
+        if (sends === 1) {
+          return Promise.resolve(jsonResponse({ error: "not_found" }, 404));
+        }
+      }
+      return broker.fetchImpl(input, init);
+    });
+    const session = await requestEphemeralSession(baseOptions(fetchImpl, {
+      channelRegenerations: 1,
+      onPairingMaterial: (material) => materials.push(material)
+    }));
+    expect(session.sessionId).toBe("sess_123");
+    expect(materials.map((material) => material.shortCode)).toEqual(["123451", "123452"]);
+    expect(broker.mintRequests.map((request) => request.channelId)).toEqual(["ch_2"]);
+  });
+
+  it("starts the channel clock after a slow create returns", async () => {
+    const broker = await fakeBroker();
+    const realNow = Date.now.bind(Date);
+    let skewMs = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + skewMs);
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const response = await broker.fetchImpl(input, init);
+      if (requestUrl(input) === `${brokerBaseUrl}/v1/channels`) {
+        // The create took longer than the channel's whole idle lifetime.
+        skewMs += 16_000;
+      }
+      return response;
+    });
+    const session = await requestEphemeralSession(baseOptions(fetchImpl, { idleTtlSeconds: 15 }));
+    expect(session.sessionId).toBe("sess_123");
+  });
+
   it("honours a cancel that lands while the result is being read, without storing", async () => {
     const broker = await fakeBroker();
     const storage = memoryStorage();

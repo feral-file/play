@@ -479,6 +479,14 @@ async function createChannel(input: {
   return { ...created, brokerBaseUrl: input.brokerBaseUrl };
 }
 
+/** Thrown internally when the broker reports the channel gone (404) or expired (410). */
+class ChannelGoneError extends Error {
+  constructor() {
+    super("channel expired");
+    this.name = "ChannelGoneError";
+  }
+}
+
 async function sendMintRequest(input: {
   fetcher: typeof fetch;
   channel: BrowserChannel;
@@ -494,15 +502,11 @@ async function sendMintRequest(input: {
     body: JSON.stringify(input.encrypted),
     ...(input.signal === undefined ? {} : { signal: input.signal })
   });
-  return parseSend(await jsonResponse(response, "message send failed"), input.channel.channelId);
-}
-
-/** Thrown internally when the broker reports the channel gone (404) or expired (410). */
-class ChannelGoneError extends Error {
-  constructor() {
-    super("channel expired");
-    this.name = "ChannelGoneError";
+  if (response.status === 404 || response.status === 410) {
+    // The channel expired between the peer joining and the request landing.
+    throw new ChannelGoneError();
   }
+  return parseSend(await jsonResponse(response, "message send failed"), input.channel.channelId);
 }
 
 async function pollMessages(input: {
@@ -740,61 +744,75 @@ async function completeMint(input: {
     recipient: "minter",
     plaintext: mintRequestPlaintext
   });
-  const sent = await sendMintRequest({ fetcher: context.fetcher, channel, encrypted: encryptedRequest, signal: context.signal });
+  // One approval deadline covers the request POST and every result poll, so
+  // a broker request that never resolves still ends in approval_timeout.
   const deadline = Date.now() + input.maxWaitMs;
-  let afterSeq = sent.seq;
-  while (Date.now() <= deadline) {
-    throwIfAborted(context.signal);
-    let poll: PollMessagesResponse;
-    // Bound each poll by maxWaitMs too, so a stalled request still times out.
-    const pollController = new AbortController();
-    const onCancel = (): void => {
-      pollController.abort();
-    };
-    context.signal?.addEventListener("abort", onCancel, { once: true });
-    const deadlineTimer = setTimeout(onCancel, Math.max(0, deadline - Date.now()));
+  const approvalController = new AbortController();
+  const abortApproval = (): void => {
+    approvalController.abort();
+  };
+  context.signal?.addEventListener("abort", abortApproval, { once: true });
+  const deadlineTimer = setTimeout(abortApproval, Math.max(0, input.maxWaitMs));
+  const timedOut = (): PlayError => new PlayError("poll timed out", "approval_timeout");
+  try {
+    let sent: SendMessageResponse;
     try {
-      poll = await pollMessages({ fetcher: context.fetcher, channel, afterSeq, signal: pollController.signal });
+      sent = await sendMintRequest({ fetcher: context.fetcher, channel, encrypted: encryptedRequest, signal: approvalController.signal });
     } catch (error) {
       throwIfAborted(context.signal);
-      if (pollController.signal.aborted) {
-        throw new PlayError("poll timed out", "approval_timeout");
-      }
-      if (error instanceof TypeError) {
-        await sleep(context.pollIntervalMs ?? defaultResultPollIntervalMs, context.signal);
-        continue;
-      }
-      if (error instanceof ChannelGoneError) {
-        throw new PlayError("poll timed out", "approval_timeout");
+      if (approvalController.signal.aborted) {
+        throw timedOut();
       }
       throw error;
-    } finally {
-      clearTimeout(deadlineTimer);
-      context.signal?.removeEventListener("abort", onCancel);
     }
-    for (const message of poll.messages) {
-      afterSeq = Math.max(afterSeq, message.seq);
-      if (message.sender !== "minter" || message.recipient !== "browser") {
-        continue;
+    let afterSeq = sent.seq;
+    while (Date.now() <= deadline) {
+      throwIfAborted(context.signal);
+      let poll: PollMessagesResponse;
+      try {
+        poll = await pollMessages({ fetcher: context.fetcher, channel, afterSeq, signal: approvalController.signal });
+      } catch (error) {
+        throwIfAborted(context.signal);
+        if (approvalController.signal.aborted) {
+          throw timedOut();
+        }
+        if (error instanceof TypeError) {
+          await sleep(context.pollIntervalMs ?? defaultResultPollIntervalMs, approvalController.signal);
+          continue;
+        }
+        if (error instanceof ChannelGoneError) {
+          throw timedOut();
+        }
+        throw error;
       }
-      const plaintext = await decryptChannelMessage({
-        privateKey: keyPair.privateKey,
-        peerPublicJwk: peer.publicKeyJwk,
-        channelId: channel.channelId,
-        messageId: message.messageId,
-        seq: message.seq,
-        sender: message.sender,
-        recipient: message.recipient,
-        algorithm: message.algorithm,
-        aad: message.aad,
-        nonce: message.nonce,
-        ciphertext: message.ciphertext
-      });
-      return parseSessionPayload(plaintext, channel.channelId, requestMessageId);
+      for (const message of poll.messages) {
+        afterSeq = Math.max(afterSeq, message.seq);
+        if (message.sender !== "minter" || message.recipient !== "browser") {
+          continue;
+        }
+        const plaintext = await decryptChannelMessage({
+          privateKey: keyPair.privateKey,
+          peerPublicJwk: peer.publicKeyJwk,
+          channelId: channel.channelId,
+          messageId: message.messageId,
+          seq: message.seq,
+          sender: message.sender,
+          recipient: message.recipient,
+          algorithm: message.algorithm,
+          aad: message.aad,
+          nonce: message.nonce,
+          ciphertext: message.ciphertext
+        });
+        return parseSessionPayload(plaintext, channel.channelId, requestMessageId);
+      }
+      await sleep(context.pollIntervalMs ?? defaultResultPollIntervalMs, approvalController.signal);
     }
-    await sleep(context.pollIntervalMs ?? defaultResultPollIntervalMs, context.signal);
+    throwIfAborted(context.signal);
+    throw timedOut();
+  } finally {
+    clearTimeout(deadlineTimer);
+    context.signal?.removeEventListener("abort", abortApproval);
   }
-  throw new PlayError("poll timed out", "approval_timeout");
 }
 
 /**
@@ -830,13 +848,15 @@ export async function requestEphemeralSession(options: RequestEphemeralSessionOp
     // one it replaces.
     const keyPair = await generateBrowserKeyPair();
     const browserPublicKeyJwk = await exportPublicJwk(keyPair.publicKey);
-    const localDeadline = Date.now() + idleTtlSeconds * 1000;
     let channel: BrowserChannel;
     try {
       channel = await createChannel({ fetcher, brokerBaseUrl, browserPublicKeyJwk, origin, browserInfo, idleTtlSeconds, signal });
     } catch (error) {
       throw signal?.aborted === true ? canceledError() : error;
     }
+    // Start the channel's clock once it exists, so a slow create does not eat
+    // its lifetime.
+    const localDeadline = Date.now() + idleTtlSeconds * 1000;
     try {
       options.onPairingMaterial?.({
         appLink: buildAppLink(appLinkBaseUrl, channel.channelId, channel.pairingToken),
