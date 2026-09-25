@@ -871,3 +871,170 @@ func decodeJSONResponse(t *testing.T, resp *http.Response, out any) (int, string
 func strconvUint(value uint64) string {
 	return strconv.FormatUint(value, 10)
 }
+
+const testSiteOrigin = "https://www.artblocks.io"
+
+var testBrowserInfo = json.RawMessage(`{"name":"Art Blocks","label":"artblocks.io","userAgent":"test"}`)
+
+func TestBrowserCreateOriginAttestation(t *testing.T) {
+	env := newTestEnv(t)
+	body := func(origin string) CreateChannelRequest {
+		return CreateChannelRequest{
+			Algorithm:           algorithm,
+			CreatorRole:         roleBrowser,
+			BrowserPublicKeyJWK: testPublicJWK,
+			Origin:              origin,
+			IdleTTLSeconds:      15,
+		}
+	}
+	tests := []struct {
+		name         string
+		headerOrigin string
+		bodyOrigin   string
+	}{
+		{name: "origin header missing", bodyOrigin: testSiteOrigin},
+		{name: "origin header missing and body origin absent"},
+		{name: "body origin differs from header", headerOrigin: "https://evil.example", bodyOrigin: testSiteOrigin},
+		{name: "body origin differs by trailing slash", headerOrigin: testSiteOrigin, bodyOrigin: testSiteOrigin + "/"},
+		{name: "opaque null origin", headerOrigin: "null"},
+		{name: "origin header with path", headerOrigin: testSiteOrigin + "/page"},
+		{name: "non web scheme", headerOrigin: "chrome-extension://abcdef"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status, errCode := postJSONWithHeaders(t, env.broker, "192.0.2.1:1000", "/v1/channels", map[string]string{"Origin": tt.headerOrigin}, body(tt.bodyOrigin), nil)
+			if status != http.StatusBadRequest || errCode != "invalid_request" {
+				t.Fatalf("status/error = %d/%q, want 400/invalid_request", status, errCode)
+			}
+		})
+	}
+
+	t.Run("body origin absent takes the header", func(t *testing.T) {
+		var created CreateChannelResponse
+		status, errCode := postJSONWithHeaders(t, env.broker, "192.0.2.2:1000", "/v1/channels", map[string]string{"Origin": "http://localhost:5173"}, body(""), &created)
+		if status != http.StatusCreated || errCode != "" {
+			t.Fatalf("status/error = %d/%q, want 201", status, errCode)
+		}
+		var qr struct {
+			Origin string `json:"origin"`
+		}
+		if err := json.Unmarshal(created.QRPayload, &qr); err != nil || qr.Origin != "http://localhost:5173" {
+			t.Fatalf("recorded origin = %q (%v), want header origin", qr.Origin, err)
+		}
+	})
+}
+
+func TestCreateRejectsWrongKeyFieldForRole(t *testing.T) {
+	env := newTestEnv(t)
+	key := string(testPublicJWK)
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "browser creator with minter key", body: `{"algorithm":"` + algorithm + `","creatorRole":"browser","minterPublicKeyJwk":` + key + `}`},
+		{name: "browser creator with both keys", body: `{"algorithm":"` + algorithm + `","creatorRole":"browser","browserPublicKeyJwk":` + key + `,"minterPublicKeyJwk":` + key + `}`},
+		{name: "browser creator key must be object", body: `{"algorithm":"` + algorithm + `","creatorRole":"browser","browserPublicKeyJwk":[]}`},
+		{name: "browser info must be object", body: `{"algorithm":"` + algorithm + `","creatorRole":"browser","browserPublicKeyJwk":` + key + `,"browserInfo":"x"}`},
+		{name: "browser info too large", body: `{"algorithm":"` + algorithm + `","creatorRole":"browser","browserPublicKeyJwk":` + key + `,"browserInfo":{"name":"` + strings.Repeat("x", maxBrowserInfoBytes) + `"}}`},
+		{name: "minter creator with browser key", body: `{"algorithm":"` + algorithm + `","creatorRole":"minter","browserPublicKeyJwk":` + key + `}`},
+		{name: "legacy creator with browser key alongside minter key", body: `{"algorithm":"` + algorithm + `","minterPublicKeyJwk":` + key + `,"browserPublicKeyJwk":` + key + `}`},
+		{name: "legacy creator with origin", body: `{"algorithm":"` + algorithm + `","minterPublicKeyJwk":` + key + `,"origin":"` + testSiteOrigin + `"}`},
+		{name: "unknown creator role", body: `{"algorithm":"` + algorithm + `","creatorRole":"controller","minterPublicKeyJwk":` + key + `}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status, errCode := postRawJSONWithHeaders(t, env.broker, "192.0.2.3:1000", "/v1/channels", map[string]string{"Origin": testSiteOrigin}, tt.body, nil)
+			if status != http.StatusBadRequest || errCode != "invalid_request" {
+				t.Fatalf("status/error = %d/%q, want 400/invalid_request", status, errCode)
+			}
+		})
+	}
+}
+
+func TestBrowserCreateRateLimitPerSource(t *testing.T) {
+	env := newTestEnv(t)
+	req := CreateChannelRequest{
+		Algorithm:           algorithm,
+		CreatorRole:         roleBrowser,
+		BrowserPublicKeyJWK: testPublicJWK,
+		IdleTTLSeconds:      15,
+	}
+	headers := map[string]string{"Origin": testSiteOrigin}
+	for i := 0; i < shortCodeAttemptLimit; i++ {
+		status, errCode := postJSONWithHeaders(t, env.broker, "198.51.100.20:1000", "/v1/channels", headers, req, nil)
+		if status != http.StatusCreated || errCode != "" {
+			t.Fatalf("create %d status/error = %d/%q, want 201", i, status, errCode)
+		}
+	}
+
+	env.restart(t)
+	status, errCode := postJSONWithHeaders(t, env.broker, "198.51.100.20:2000", "/v1/channels", headers, req, nil)
+	if status != http.StatusTooManyRequests || errCode != "rate_limited" {
+		t.Fatalf("over-limit create status/error = %d/%q, want 429/rate_limited", status, errCode)
+	}
+
+	status, errCode = postJSONWithHeaders(t, env.broker, "198.51.100.21:1000", "/v1/channels", headers, req, nil)
+	if status != http.StatusCreated || errCode != "" {
+		t.Fatalf("create from another source status/error = %d/%q, want 201", status, errCode)
+	}
+
+	// Minter-created channels are exempt, even from a limited source.
+	status, errCode = postJSONWithHeaders(t, env.broker, "198.51.100.20:3000", "/v1/channels", nil, CreateChannelRequest{
+		Algorithm:          algorithm,
+		MinterPublicKeyJWK: testPublicJWK,
+		IdleTTLSeconds:     15,
+	}, nil)
+	if status != http.StatusCreated || errCode != "" {
+		t.Fatalf("minter create from limited source status/error = %d/%q, want 201", status, errCode)
+	}
+
+	*env.clock = env.clock.Add(shortCodeLockout + time.Second)
+	status, errCode = postJSONWithHeaders(t, env.broker, "198.51.100.20:4000", "/v1/channels", headers, req, nil)
+	if status != http.StatusCreated || errCode != "" {
+		t.Fatalf("create after lockout status/error = %d/%q, want 201", status, errCode)
+	}
+}
+
+func createBrowserChannel(t *testing.T, env *testEnv, shortCodeRequested bool) CreateChannelResponse {
+	t.Helper()
+	var response CreateChannelResponse
+	status, errCode := postJSONWithHeaders(t, env.broker, "203.0.113.5:4321", "/v1/channels", map[string]string{"Origin": testSiteOrigin}, CreateChannelRequest{
+		Algorithm:           algorithm,
+		CreatorRole:         roleBrowser,
+		BrowserPublicKeyJWK: testPublicJWK,
+		Origin:              testSiteOrigin,
+		BrowserInfo:         testBrowserInfo,
+		IdleTTLSeconds:      15,
+		ShortCodeRequested:  shortCodeRequested,
+	}, &response)
+	if status != http.StatusCreated || errCode != "" {
+		t.Fatalf("browser create status/error = %d/%q, want 201", status, errCode)
+	}
+	return response
+}
+
+func postJSONWithHeaders(t *testing.T, handler http.Handler, remoteAddr, path string, headers map[string]string, body any, out any) (int, string) {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	return postRawJSONWithHeaders(t, handler, remoteAddr, path, headers, string(raw), out)
+}
+
+func postRawJSONWithHeaders(t *testing.T, handler http.Handler, remoteAddr, path string, headers map[string]string, body string, out any) (int, string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.RemoteAddr = remoteAddr
+	req.Header.Set("Content-Type", "application/json")
+	for name, value := range headers {
+		if value != "" {
+			req.Header.Set(name, value)
+		}
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+	resp := recorder.Result()
+	defer resp.Body.Close()
+	return decodeJSONResponse(t, resp, out)
+}
