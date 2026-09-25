@@ -871,3 +871,540 @@ func decodeJSONResponse(t *testing.T, resp *http.Response, out any) (int, string
 func strconvUint(value uint64) string {
 	return strconv.FormatUint(value, 10)
 }
+
+const testSiteOrigin = "https://www.artblocks.io"
+
+var testBrowserInfo = json.RawMessage(`{"name":"Art Blocks","label":"artblocks.io","userAgent":"test"}`)
+
+func TestBrowserCreatedChannelHappyPath(t *testing.T) {
+	for _, credential := range []string{"shortCode", "pairingToken"} {
+		t.Run(credential, func(t *testing.T) {
+			env := newTestEnv(t)
+			created := createBrowserChannel(t, env, true)
+			if created.CreatorRole != roleBrowser || !strings.HasPrefix(created.BrowserToken, "bt_") || created.MinterToken != "" {
+				t.Fatalf("browser create response roles/tokens: %+v", created)
+			}
+			if !strings.HasPrefix(created.PairingToken, "pt_") || created.ShortCode == "" {
+				t.Fatalf("browser create response omitted pairing material: %+v", created)
+			}
+			var qr map[string]any
+			if err := json.Unmarshal(created.QRPayload, &qr); err != nil {
+				t.Fatalf("decode qr payload: %v", err)
+			}
+			if qr["v"] != float64(2) || qr["creatorRole"] != roleBrowser || qr["origin"] != testSiteOrigin || qr["channelId"] != created.ChannelID || qr["brokerBaseUrl"] != "https://pairing.test" {
+				t.Fatalf("unexpected v2 qr payload: %s", created.QRPayload)
+			}
+			if _, ok := qr["minterPublicKeyJwk"]; ok {
+				t.Fatalf("v2 qr payload carries a minter key: %s", created.QRPayload)
+			}
+
+			waiting := pollMessages(t, env, created.ChannelID, created.BrowserToken, 0)
+			if waiting.Status != statusWaiting || waiting.Peer != nil || len(waiting.Messages) != 0 {
+				t.Fatalf("waiting poll = %+v", waiting)
+			}
+
+			var joined JoinChannelResponse
+			var rawJoin map[string]json.RawMessage
+			joinReq := JoinChannelRequest{MinterPublicKeyJWK: alternatePublicJWK}
+			if credential == "shortCode" {
+				var resolved ResolvePairingCodeResponse
+				var rawResolve map[string]json.RawMessage
+				status, errCode := postJSON(t, env.server.URL+"/v1/pairing-codes/resolve", "", ResolvePairingCodeRequest{ShortCode: created.ShortCode}, &rawResolve)
+				if status != http.StatusOK || errCode != "" {
+					t.Fatalf("resolve status/error = %d/%q, want 200", status, errCode)
+				}
+				remarshal(t, rawResolve, &resolved)
+				if resolved.ChannelID != created.ChannelID || resolved.CreatorRole != roleBrowser || resolved.Origin != testSiteOrigin {
+					t.Fatalf("resolved = %+v", resolved)
+				}
+				if !equalJSON(resolved.BrowserPublicKeyJWK, testPublicJWK) || !equalJSON(resolved.BrowserInfo, testBrowserInfo) {
+					t.Fatalf("resolved browser key/info = %s / %s", resolved.BrowserPublicKeyJWK, resolved.BrowserInfo)
+				}
+				if _, ok := rawResolve["minterPublicKeyJwk"]; ok {
+					t.Fatal("resolve of a browser-created channel returned minterPublicKeyJwk")
+				}
+				joinReq.ShortCode = created.ShortCode
+			} else {
+				joinReq.PairingToken = created.PairingToken
+			}
+			status, errCode := postJSON(t, env.server.URL+"/v1/channels/"+created.ChannelID+"/join", "", joinReq, &rawJoin)
+			if status != http.StatusCreated || errCode != "" {
+				t.Fatalf("minter join status/error = %d/%q, want 201", status, errCode)
+			}
+			remarshal(t, rawJoin, &joined)
+			if joined.Role != roleMinter || !strings.HasPrefix(joined.MinterToken, "mt_") || joined.BrowserToken != "" || joined.NextSeq != 1 {
+				t.Fatalf("minter join response = %+v", joined)
+			}
+			if joined.Origin != testSiteOrigin || !equalJSON(joined.BrowserPublicKeyJWK, testPublicJWK) || !equalJSON(joined.BrowserInfo, testBrowserInfo) {
+				t.Fatalf("minter join attested fields = %+v", joined)
+			}
+			if _, ok := rawJoin["minterPublicKeyJwk"]; ok {
+				t.Fatal("minter join response echoed minterPublicKeyJwk")
+			}
+
+			status, errCode = postJSON(t, env.server.URL+"/v1/channels/"+created.ChannelID+"/join", "", joinReq, nil)
+			if status != http.StatusUnauthorized || errCode != "unauthorized" {
+				t.Fatalf("second minter join status/error = %d/%q, want 401/unauthorized", status, errCode)
+			}
+
+			browserPoll := pollMessages(t, env, created.ChannelID, created.BrowserToken, 0)
+			if browserPoll.Status != statusPaired || browserPoll.Peer == nil || browserPoll.Peer.Role != roleMinter || !equalJSON(browserPoll.Peer.PublicKeyJWK, alternatePublicJWK) {
+				t.Fatalf("browser poll after join = %+v", browserPoll)
+			}
+			minterPoll := pollMessages(t, env, created.ChannelID, joined.MinterToken, 0)
+			if minterPoll.Peer == nil || minterPoll.Peer.Role != roleBrowser || !equalJSON(minterPoll.Peer.PublicKeyJWK, testPublicJWK) {
+				t.Fatalf("minter poll peer = %+v", minterPoll.Peer)
+			}
+
+			mintRequest := AppendMessageRequest{
+				MessageID:          "msg_mint_request",
+				Sender:             roleBrowser,
+				Recipient:          roleMinter,
+				Algorithm:          algorithm,
+				AAD:                "aad",
+				Nonce:              "nonce",
+				Ciphertext:         "ciphertext",
+				SenderPublicKeyJWK: alternatePublicJWK,
+			}
+			status, errCode = postJSON(t, env.server.URL+"/v1/channels/"+created.ChannelID+"/messages", created.BrowserToken, mintRequest, nil)
+			if status != http.StatusBadRequest || errCode != "invalid_request" {
+				t.Fatalf("browser append with a non-create key status/error = %d/%q, want 400/invalid_request", status, errCode)
+			}
+			mintRequest.SenderPublicKeyJWK = testPublicJWK
+			if appended := appendMessage(t, env, created.ChannelID, created.BrowserToken, mintRequest); appended.Seq != 1 {
+				t.Fatalf("mint_request seq = %d, want 1", appended.Seq)
+			}
+			minterPoll = pollMessages(t, env, created.ChannelID, joined.MinterToken, 0)
+			if len(minterPoll.Messages) != 1 || minterPoll.Messages[0].MessageID != "msg_mint_request" {
+				t.Fatalf("minter poll messages = %+v", minterPoll.Messages)
+			}
+			if appended := appendMessage(t, env, created.ChannelID, joined.MinterToken, AppendMessageRequest{
+				MessageID:          "msg_mint_result",
+				Sender:             roleMinter,
+				Recipient:          roleBrowser,
+				Algorithm:          algorithm,
+				AAD:                "aad",
+				Nonce:              "nonce",
+				Ciphertext:         "ciphertext",
+				SenderPublicKeyJWK: alternatePublicJWK,
+			}); appended.Seq != 2 {
+				t.Fatalf("mint result seq = %d, want 2", appended.Seq)
+			}
+			browserPoll = pollMessages(t, env, created.ChannelID, created.BrowserToken, 1)
+			if len(browserPoll.Messages) != 1 || browserPoll.Messages[0].MessageID != "msg_mint_result" {
+				t.Fatalf("browser poll messages = %+v", browserPoll.Messages)
+			}
+
+			status, errCode = deleteJSON(t, env.server.URL+"/v1/channels/"+created.ChannelID, joined.MinterToken)
+			if status != http.StatusOK || errCode != "" {
+				t.Fatalf("minter close status/error = %d/%q, want 200", status, errCode)
+			}
+		})
+	}
+}
+
+func TestBrowserCreateOriginAttestation(t *testing.T) {
+	env := newTestEnv(t)
+	body := func(origin string) CreateChannelRequest {
+		return CreateChannelRequest{
+			Algorithm:           algorithm,
+			CreatorRole:         roleBrowser,
+			BrowserPublicKeyJWK: testPublicJWK,
+			Origin:              origin,
+			IdleTTLSeconds:      15,
+		}
+	}
+	tests := []struct {
+		name         string
+		headerOrigin string
+		bodyOrigin   string
+	}{
+		{name: "origin header missing", bodyOrigin: testSiteOrigin},
+		{name: "origin header missing and body origin absent"},
+		{name: "body origin differs from header", headerOrigin: "https://evil.example", bodyOrigin: testSiteOrigin},
+		{name: "body origin differs by trailing slash", headerOrigin: testSiteOrigin, bodyOrigin: testSiteOrigin + "/"},
+		{name: "opaque null origin", headerOrigin: "null"},
+		{name: "origin header with path", headerOrigin: testSiteOrigin + "/page"},
+		{name: "non web scheme", headerOrigin: "chrome-extension://abcdef"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status, errCode := postJSONWithHeaders(t, env.broker, "192.0.2.1:1000", "/v1/channels", map[string]string{"Origin": tt.headerOrigin}, body(tt.bodyOrigin), nil)
+			if status != http.StatusBadRequest || errCode != "invalid_request" {
+				t.Fatalf("status/error = %d/%q, want 400/invalid_request", status, errCode)
+			}
+		})
+	}
+
+	t.Run("body origin absent takes the header", func(t *testing.T) {
+		var created CreateChannelResponse
+		status, errCode := postJSONWithHeaders(t, env.broker, "192.0.2.2:1000", "/v1/channels", map[string]string{"Origin": "http://localhost:5173"}, body(""), &created)
+		if status != http.StatusCreated || errCode != "" {
+			t.Fatalf("status/error = %d/%q, want 201", status, errCode)
+		}
+		var qr struct {
+			Origin string `json:"origin"`
+		}
+		if err := json.Unmarshal(created.QRPayload, &qr); err != nil || qr.Origin != "http://localhost:5173" {
+			t.Fatalf("recorded origin = %q (%v), want header origin", qr.Origin, err)
+		}
+	})
+}
+
+func TestCreateRejectsWrongKeyFieldForRole(t *testing.T) {
+	env := newTestEnv(t)
+	key := string(testPublicJWK)
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "browser creator with minter key", body: `{"algorithm":"` + algorithm + `","creatorRole":"browser","minterPublicKeyJwk":` + key + `}`},
+		{name: "browser creator with both keys", body: `{"algorithm":"` + algorithm + `","creatorRole":"browser","browserPublicKeyJwk":` + key + `,"minterPublicKeyJwk":` + key + `}`},
+		{name: "browser creator key must be object", body: `{"algorithm":"` + algorithm + `","creatorRole":"browser","browserPublicKeyJwk":[]}`},
+		{name: "browser info must be object", body: `{"algorithm":"` + algorithm + `","creatorRole":"browser","browserPublicKeyJwk":` + key + `,"browserInfo":"x"}`},
+		{name: "browser info too large", body: `{"algorithm":"` + algorithm + `","creatorRole":"browser","browserPublicKeyJwk":` + key + `,"browserInfo":{"name":"` + strings.Repeat("x", maxBrowserInfoBytes) + `"}}`},
+		{name: "minter creator with browser key", body: `{"algorithm":"` + algorithm + `","creatorRole":"minter","browserPublicKeyJwk":` + key + `}`},
+		{name: "legacy creator with browser key alongside minter key", body: `{"algorithm":"` + algorithm + `","minterPublicKeyJwk":` + key + `,"browserPublicKeyJwk":` + key + `}`},
+		{name: "legacy creator with origin", body: `{"algorithm":"` + algorithm + `","minterPublicKeyJwk":` + key + `,"origin":"` + testSiteOrigin + `"}`},
+		{name: "unknown creator role", body: `{"algorithm":"` + algorithm + `","creatorRole":"controller","minterPublicKeyJwk":` + key + `}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status, errCode := postRawJSONWithHeaders(t, env.broker, "192.0.2.3:1000", "/v1/channels", map[string]string{"Origin": testSiteOrigin}, tt.body, nil)
+			if status != http.StatusBadRequest || errCode != "invalid_request" {
+				t.Fatalf("status/error = %d/%q, want 400/invalid_request", status, errCode)
+			}
+		})
+	}
+}
+
+func TestJoinRejectsWrongKeyFieldForChannelRole(t *testing.T) {
+	env := newTestEnv(t)
+	browserCreated := createBrowserChannel(t, env, true)
+	minterCreated := createChannel(t, env, true)
+	key := string(alternatePublicJWK)
+	tests := []struct {
+		name      string
+		channelID string
+		body      string
+	}{
+		{
+			name:      "legacy browser join on a browser-created channel",
+			channelID: browserCreated.ChannelID,
+			body:      `{"pairingToken":"` + browserCreated.PairingToken + `","browserPublicKeyJwk":` + key + `,"origin":"https://nft.example"}`,
+		},
+		{
+			name:      "minter join carrying origin",
+			channelID: browserCreated.ChannelID,
+			body:      `{"pairingToken":"` + browserCreated.PairingToken + `","minterPublicKeyJwk":` + key + `,"origin":"https://nft.example"}`,
+		},
+		{
+			name:      "minter join carrying browser info",
+			channelID: browserCreated.ChannelID,
+			body:      `{"pairingToken":"` + browserCreated.PairingToken + `","minterPublicKeyJwk":` + key + `,"browserInfo":{"name":"x"}}`,
+		},
+		{
+			name:      "both keys",
+			channelID: browserCreated.ChannelID,
+			body:      `{"pairingToken":"` + browserCreated.PairingToken + `","minterPublicKeyJwk":` + key + `,"browserPublicKeyJwk":` + key + `}`,
+		},
+		{
+			name:      "no key",
+			channelID: browserCreated.ChannelID,
+			body:      `{"pairingToken":"` + browserCreated.PairingToken + `"}`,
+		},
+		{
+			name:      "minter key on a minter-created channel",
+			channelID: minterCreated.ChannelID,
+			body:      `{"pairingToken":"` + minterCreated.PairingToken + `","minterPublicKeyJwk":` + key + `}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status, errCode := postRawJSON(t, env.server.URL+"/v1/channels/"+tt.channelID+"/join", "", tt.body, nil)
+			if status != http.StatusBadRequest || errCode != "invalid_request" {
+				t.Fatalf("status/error = %d/%q, want 400/invalid_request", status, errCode)
+			}
+		})
+	}
+
+	// None of the rejected joins consumed the pairing token.
+	var joined JoinChannelResponse
+	status, errCode := postJSON(t, env.server.URL+"/v1/channels/"+browserCreated.ChannelID+"/join", "", JoinChannelRequest{
+		PairingToken:       browserCreated.PairingToken,
+		MinterPublicKeyJWK: alternatePublicJWK,
+	}, &joined)
+	if status != http.StatusCreated || errCode != "" || joined.Role != roleMinter {
+		t.Fatalf("valid minter join after rejections status/error/role = %d/%q/%q, want 201 minter", status, errCode, joined.Role)
+	}
+}
+
+func TestBrowserCreateRateLimitPerSource(t *testing.T) {
+	env := newTestEnv(t)
+	req := CreateChannelRequest{
+		Algorithm:           algorithm,
+		CreatorRole:         roleBrowser,
+		BrowserPublicKeyJWK: testPublicJWK,
+		IdleTTLSeconds:      15,
+	}
+	headers := map[string]string{"Origin": testSiteOrigin}
+	for i := 0; i < shortCodeAttemptLimit; i++ {
+		status, errCode := postJSONWithHeaders(t, env.broker, "198.51.100.20:1000", "/v1/channels", headers, req, nil)
+		if status != http.StatusCreated || errCode != "" {
+			t.Fatalf("create %d status/error = %d/%q, want 201", i, status, errCode)
+		}
+	}
+
+	env.restart(t)
+	status, errCode := postJSONWithHeaders(t, env.broker, "198.51.100.20:2000", "/v1/channels", headers, req, nil)
+	if status != http.StatusTooManyRequests || errCode != "rate_limited" {
+		t.Fatalf("over-limit create status/error = %d/%q, want 429/rate_limited", status, errCode)
+	}
+
+	status, errCode = postJSONWithHeaders(t, env.broker, "198.51.100.21:1000", "/v1/channels", headers, req, nil)
+	if status != http.StatusCreated || errCode != "" {
+		t.Fatalf("create from another source status/error = %d/%q, want 201", status, errCode)
+	}
+
+	// Minter-created channels are exempt, even from a limited source.
+	status, errCode = postJSONWithHeaders(t, env.broker, "198.51.100.20:3000", "/v1/channels", nil, CreateChannelRequest{
+		Algorithm:          algorithm,
+		MinterPublicKeyJWK: testPublicJWK,
+		IdleTTLSeconds:     15,
+	}, nil)
+	if status != http.StatusCreated || errCode != "" {
+		t.Fatalf("minter create from limited source status/error = %d/%q, want 201", status, errCode)
+	}
+
+	*env.clock = env.clock.Add(shortCodeLockout + time.Second)
+	status, errCode = postJSONWithHeaders(t, env.broker, "198.51.100.20:4000", "/v1/channels", headers, req, nil)
+	if status != http.StatusCreated || errCode != "" {
+		t.Fatalf("create after lockout status/error = %d/%q, want 201", status, errCode)
+	}
+}
+
+func TestLegacyResponsesNameRoles(t *testing.T) {
+	env := newTestEnv(t)
+	created := createChannel(t, env, true)
+	if created.CreatorRole != roleMinter {
+		t.Fatalf("legacy create creatorRole = %q, want minter", created.CreatorRole)
+	}
+	var resolved ResolvePairingCodeResponse
+	status, errCode := postJSON(t, env.server.URL+"/v1/pairing-codes/resolve", "", ResolvePairingCodeRequest{ShortCode: created.ShortCode}, &resolved)
+	if status != http.StatusOK || errCode != "" || resolved.CreatorRole != roleMinter || len(resolved.BrowserPublicKeyJWK) != 0 {
+		t.Fatalf("legacy resolve = %d/%q %+v", status, errCode, resolved)
+	}
+	waiting := pollMessages(t, env, created.ChannelID, created.MinterToken, 0)
+	if waiting.Status != statusWaiting || waiting.Peer != nil {
+		t.Fatalf("legacy waiting poll = %+v", waiting)
+	}
+	joined := joinWithPairingToken(t, env, created)
+	if joined.Role != roleBrowser || joined.MinterToken != "" || joined.Origin != "" || len(joined.BrowserInfo) != 0 {
+		t.Fatalf("legacy join response = %+v", joined)
+	}
+	minterPoll := pollMessages(t, env, created.ChannelID, created.MinterToken, 0)
+	if minterPoll.Status != statusPaired || minterPoll.Peer == nil || minterPoll.Peer.Role != roleBrowser || !equalJSON(minterPoll.Peer.PublicKeyJWK, testPublicJWK) {
+		t.Fatalf("legacy minter poll after join = %+v", minterPoll)
+	}
+	browserPoll := pollMessages(t, env, created.ChannelID, joined.BrowserToken, 0)
+	if browserPoll.Peer == nil || browserPoll.Peer.Role != roleMinter {
+		t.Fatalf("legacy browser poll peer = %+v", browserPoll.Peer)
+	}
+}
+
+func TestLegacyRecordWithoutCreatorRoleIsMinterCreated(t *testing.T) {
+	env := newTestEnv(t)
+	created := createChannel(t, env, false)
+	// Rewrite the stored record the way a pre-upgrade broker wrote it.
+	err := env.broker.db.Update(func(tx *bolt.Tx) error {
+		_, metaBucket, _, _, _ := channelBuckets(tx, created.ChannelID)
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(metaBucket.Get([]byte(recordKey)), &raw); err != nil {
+			return err
+		}
+		delete(raw, "creatorRole")
+		return putJSON(metaBucket, []byte(recordKey), raw)
+	})
+	if err != nil {
+		t.Fatalf("rewrite record: %v", err)
+	}
+	joined := joinWithPairingToken(t, env, created)
+	if joined.Role != roleBrowser || !bytes.Equal(joined.MinterPublicKeyJWK, testPublicJWK) {
+		t.Fatalf("join of a pre-upgrade record = %+v", joined)
+	}
+}
+
+func createBrowserChannel(t *testing.T, env *testEnv, shortCodeRequested bool) CreateChannelResponse {
+	t.Helper()
+	var response CreateChannelResponse
+	status, errCode := postJSONWithHeaders(t, env.broker, "203.0.113.5:4321", "/v1/channels", map[string]string{"Origin": testSiteOrigin}, CreateChannelRequest{
+		Algorithm:           algorithm,
+		CreatorRole:         roleBrowser,
+		BrowserPublicKeyJWK: testPublicJWK,
+		Origin:              testSiteOrigin,
+		BrowserInfo:         testBrowserInfo,
+		IdleTTLSeconds:      15,
+		ShortCodeRequested:  shortCodeRequested,
+	}, &response)
+	if status != http.StatusCreated || errCode != "" {
+		t.Fatalf("browser create status/error = %d/%q, want 201", status, errCode)
+	}
+	return response
+}
+
+func postJSONWithHeaders(t *testing.T, handler http.Handler, remoteAddr, path string, headers map[string]string, body any, out any) (int, string) {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	return postRawJSONWithHeaders(t, handler, remoteAddr, path, headers, string(raw), out)
+}
+
+func postRawJSONWithHeaders(t *testing.T, handler http.Handler, remoteAddr, path string, headers map[string]string, body string, out any) (int, string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.RemoteAddr = remoteAddr
+	req.Header.Set("Content-Type", "application/json")
+	for name, value := range headers {
+		if value != "" {
+			req.Header.Set(name, value)
+		}
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+	resp := recorder.Result()
+	defer resp.Body.Close()
+	return decodeJSONResponse(t, resp, out)
+}
+
+func remarshal(t *testing.T, in any, out any) {
+	t.Helper()
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("remarshal: %v", err)
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		t.Fatalf("remarshal decode: %v", err)
+	}
+}
+
+func newBrokerWithTrustProxy(t *testing.T, trustProxy bool) *Broker {
+	t.Helper()
+	now := time.Date(2026, 9, 25, 10, 0, 0, 0, time.UTC)
+	broker, err := NewBroker(Config{
+		DBPath:        filepath.Join(t.TempDir(), "broker.db"),
+		BrokerBaseURL: "https://pairing.test",
+		TrustProxy:    trustProxy,
+		Now:           func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewBroker: %v", err)
+	}
+	t.Cleanup(func() { _ = broker.Close() })
+	return broker
+}
+
+func browserCreateBody() CreateChannelRequest {
+	return CreateChannelRequest{
+		Algorithm:           algorithm,
+		CreatorRole:         roleBrowser,
+		BrowserPublicKeyJWK: testPublicJWK,
+		IdleTTLSeconds:      15,
+	}
+}
+
+// proxyAddr stands in for the reverse proxy: every request reaches the broker
+// from the same connection address.
+const proxyAddr = "10.0.0.2:44321"
+
+func TestTrustProxySeparatesSourcesByLastForwardedFor(t *testing.T) {
+	broker := newBrokerWithTrustProxy(t, true)
+	create := func(forwardedFor string) (int, string) {
+		t.Helper()
+		return postJSONWithHeaders(t, broker, proxyAddr, "/v1/channels", map[string]string{
+			"Origin":          testSiteOrigin,
+			"X-Forwarded-For": forwardedFor,
+		}, browserCreateBody(), nil)
+	}
+	for i := 0; i < shortCodeAttemptLimit; i++ {
+		if status, errCode := create("198.51.100.30"); status != http.StatusCreated {
+			t.Fatalf("create %d from peer A status/error = %d/%q, want 201", i, status, errCode)
+		}
+	}
+	if status, errCode := create("198.51.100.30"); status != http.StatusTooManyRequests || errCode != "rate_limited" {
+		t.Fatalf("over-limit create from peer A status/error = %d/%q, want 429/rate_limited", status, errCode)
+	}
+	// A client-supplied entry ahead of the proxy's own does not change the source.
+	if status, errCode := create("203.0.113.99, 198.51.100.30"); status != http.StatusTooManyRequests {
+		t.Fatalf("spoofed-prefix create status/error = %d/%q, want 429", status, errCode)
+	}
+	if status, errCode := create("198.51.100.31"); status != http.StatusCreated || errCode != "" {
+		t.Fatalf("create from peer B behind the same proxy status/error = %d/%q, want 201", status, errCode)
+	}
+
+	// The resolve aggregate limit uses the same source.
+	for misses, candidate := 0, 0; misses < shortCodeAttemptLimit; candidate++ {
+		status, errCode := postJSONWithHeaders(t, broker, proxyAddr, "/v1/pairing-codes/resolve", map[string]string{"X-Forwarded-For": "198.51.100.40"}, ResolvePairingCodeRequest{ShortCode: fmt.Sprintf("%06d", candidate)}, nil)
+		if status != http.StatusNotFound || errCode != "not_found" {
+			t.Fatalf("resolve miss %d status/error = %d/%q, want 404", misses, status, errCode)
+		}
+		misses++
+	}
+	status, errCode := postJSONWithHeaders(t, broker, proxyAddr, "/v1/pairing-codes/resolve", map[string]string{"X-Forwarded-For": "198.51.100.40"}, ResolvePairingCodeRequest{ShortCode: "999999"}, nil)
+	if status != http.StatusTooManyRequests || errCode != "rate_limited" {
+		t.Fatalf("limited resolve status/error = %d/%q, want 429", status, errCode)
+	}
+	status, errCode = postJSONWithHeaders(t, broker, proxyAddr, "/v1/pairing-codes/resolve", map[string]string{"X-Forwarded-For": "198.51.100.41"}, ResolvePairingCodeRequest{ShortCode: "999999"}, nil)
+	if status != http.StatusNotFound || errCode != "not_found" {
+		t.Fatalf("resolve from another peer status/error = %d/%q, want 404", status, errCode)
+	}
+}
+
+func TestTrustProxyOffIgnoresForwardedFor(t *testing.T) {
+	broker := newBrokerWithTrustProxy(t, false)
+	for i := 0; i < shortCodeAttemptLimit; i++ {
+		status, errCode := postJSONWithHeaders(t, broker, proxyAddr, "/v1/channels", map[string]string{
+			"Origin":          testSiteOrigin,
+			"X-Forwarded-For": fmt.Sprintf("198.51.100.%d", 50+i),
+		}, browserCreateBody(), nil)
+		if status != http.StatusCreated {
+			t.Fatalf("create %d status/error = %d/%q, want 201", i, status, errCode)
+		}
+	}
+	status, errCode := postJSONWithHeaders(t, broker, proxyAddr, "/v1/channels", map[string]string{
+		"Origin":          testSiteOrigin,
+		"X-Forwarded-For": "198.51.100.99",
+	}, browserCreateBody(), nil)
+	if status != http.StatusTooManyRequests || errCode != "rate_limited" {
+		t.Fatalf("create with a fresh X-Forwarded-For and trust off status/error = %d/%q, want 429", status, errCode)
+	}
+}
+
+func TestClientHostFallsBackToRemoteAddr(t *testing.T) {
+	trusting := &Broker{trustProxy: true}
+	tests := []struct {
+		name   string
+		header []string
+		want   string
+	}{
+		{name: "no header", want: "10.0.0.2"},
+		{name: "empty header", header: []string{""}, want: "10.0.0.2"},
+		{name: "unparsable last entry", header: []string{"198.51.100.1, not-an-ip"}, want: "10.0.0.2"},
+		{name: "last entry of last header", header: []string{"198.51.100.1", "203.0.113.7, 198.51.100.2"}, want: "198.51.100.2"},
+		{name: "ipv6", header: []string{"2001:db8::1"}, want: "2001:db8::1"},
+		{name: "ip with port", header: []string{"198.51.100.3:5555"}, want: "198.51.100.3"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/channels", nil)
+			req.RemoteAddr = proxyAddr
+			for _, value := range tt.header {
+				req.Header.Add("X-Forwarded-For", value)
+			}
+			if got := trusting.clientHost(req); got != tt.want {
+				t.Fatalf("clientHost = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

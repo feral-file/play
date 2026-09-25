@@ -80,27 +80,41 @@ type Config struct {
 	Addr          string
 	DBPath        string
 	BrokerBaseURL string
-	Now           func() time.Time
+	// TrustProxy makes the broker take the client address from the last
+	// X-Forwarded-For entry, which the reverse proxy in front of it appends.
+	// Only enable it when every request arrives through such a proxy.
+	TrustProxy bool
+	Now        func() time.Time
 }
 
 type Broker struct {
 	db            *bolt.DB
 	brokerBaseURL string
+	trustProxy    bool
 	now           func() time.Time
 }
 
 type ChannelRecord struct {
-	ChannelID             string          `json:"channelId"`
-	Version               int             `json:"version"`
-	Status                string          `json:"status"`
-	Algorithm             string          `json:"algorithm"`
-	CreatedAt             string          `json:"createdAt"`
-	PairedAt              string          `json:"pairedAt,omitempty"`
-	LastMessageAt         string          `json:"lastMessageAt"`
-	ExpiresAt             string          `json:"expiresAt"`
-	IdleTTLSeconds        int             `json:"idleTtlSeconds"`
-	MinterPublicKeyJWK    json.RawMessage `json:"minterPublicKeyJwk"`
-	BrowserPublicKeyJWK   json.RawMessage `json:"browserPublicKeyJwk,omitempty"`
+	ChannelID string `json:"channelId"`
+	Version   int    `json:"version"`
+	Status    string `json:"status"`
+	Algorithm string `json:"algorithm"`
+	// CreatorRole is the role that created the channel: "minter" (the legacy
+	// device-initiated flow, also assumed when absent) or "browser" (the
+	// site-initiated flow). The joiner is always the opposite role.
+	CreatorRole         string          `json:"creatorRole,omitempty"`
+	CreatedAt           string          `json:"createdAt"`
+	PairedAt            string          `json:"pairedAt,omitempty"`
+	LastMessageAt       string          `json:"lastMessageAt"`
+	ExpiresAt           string          `json:"expiresAt"`
+	IdleTTLSeconds      int             `json:"idleTtlSeconds"`
+	MinterPublicKeyJWK  json.RawMessage `json:"minterPublicKeyJwk,omitempty"`
+	BrowserPublicKeyJWK json.RawMessage `json:"browserPublicKeyJwk,omitempty"`
+	// Origin is the site origin attested from the HTTP Origin header when a
+	// browser created the channel. Empty for minter-created channels.
+	Origin string `json:"origin,omitempty"`
+	// BrowserInfo is optional requester metadata for browser-created channels.
+	BrowserInfo           json.RawMessage `json:"browserInfo,omitempty"`
 	PairingTokenHash      string          `json:"pairingTokenHash"`
 	PairingConsumedAt     string          `json:"pairingConsumedAt,omitempty"`
 	ShortCodeHash         string          `json:"shortCodeHash,omitempty"`
@@ -131,15 +145,21 @@ type MessageRecord struct {
 }
 
 type CreateChannelRequest struct {
-	Algorithm          string          `json:"algorithm"`
-	MinterPublicKeyJWK json.RawMessage `json:"minterPublicKeyJwk"`
-	IdleTTLSeconds     int             `json:"idleTtlSeconds"`
-	ShortCodeRequested bool            `json:"shortCodeRequested"`
+	Algorithm           string          `json:"algorithm"`
+	CreatorRole         string          `json:"creatorRole,omitempty"`
+	MinterPublicKeyJWK  json.RawMessage `json:"minterPublicKeyJwk,omitempty"`
+	BrowserPublicKeyJWK json.RawMessage `json:"browserPublicKeyJwk,omitempty"`
+	Origin              string          `json:"origin,omitempty"`
+	BrowserInfo         json.RawMessage `json:"browserInfo,omitempty"`
+	IdleTTLSeconds      int             `json:"idleTtlSeconds"`
+	ShortCodeRequested  bool            `json:"shortCodeRequested"`
 }
 
 type CreateChannelResponse struct {
 	ChannelID    string          `json:"channelId"`
-	MinterToken  string          `json:"minterToken"`
+	CreatorRole  string          `json:"creatorRole"`
+	MinterToken  string          `json:"minterToken,omitempty"`
+	BrowserToken string          `json:"browserToken,omitempty"`
 	PairingToken string          `json:"pairingToken"`
 	ShortCode    string          `json:"shortCode,omitempty"`
 	ExpiresAt    string          `json:"expiresAt"`
@@ -149,18 +169,24 @@ type CreateChannelResponse struct {
 type JoinChannelRequest struct {
 	PairingToken        string          `json:"pairingToken,omitempty"`
 	ShortCode           string          `json:"shortCode,omitempty"`
-	BrowserPublicKeyJWK json.RawMessage `json:"browserPublicKeyJwk"`
+	BrowserPublicKeyJWK json.RawMessage `json:"browserPublicKeyJwk,omitempty"`
+	MinterPublicKeyJWK  json.RawMessage `json:"minterPublicKeyJwk,omitempty"`
 	Origin              string          `json:"origin,omitempty"`
 	BrowserInfo         json.RawMessage `json:"browserInfo,omitempty"`
 }
 
 type JoinChannelResponse struct {
-	ChannelID          string          `json:"channelId"`
-	BrowserToken       string          `json:"browserToken"`
-	Algorithm          string          `json:"algorithm"`
-	MinterPublicKeyJWK json.RawMessage `json:"minterPublicKeyJwk"`
-	ExpiresAt          string          `json:"expiresAt"`
-	NextSeq            uint64          `json:"nextSeq"`
+	ChannelID           string          `json:"channelId"`
+	Role                string          `json:"role"`
+	BrowserToken        string          `json:"browserToken,omitempty"`
+	MinterToken         string          `json:"minterToken,omitempty"`
+	Algorithm           string          `json:"algorithm"`
+	MinterPublicKeyJWK  json.RawMessage `json:"minterPublicKeyJwk,omitempty"`
+	BrowserPublicKeyJWK json.RawMessage `json:"browserPublicKeyJwk,omitempty"`
+	Origin              string          `json:"origin,omitempty"`
+	BrowserInfo         json.RawMessage `json:"browserInfo,omitempty"`
+	ExpiresAt           string          `json:"expiresAt"`
+	NextSeq             uint64          `json:"nextSeq"`
 }
 
 type ResolvePairingCodeRequest struct {
@@ -168,10 +194,14 @@ type ResolvePairingCodeRequest struct {
 }
 
 type ResolvePairingCodeResponse struct {
-	ChannelID          string          `json:"channelId"`
-	Algorithm          string          `json:"algorithm"`
-	MinterPublicKeyJWK json.RawMessage `json:"minterPublicKeyJwk"`
-	ExpiresAt          string          `json:"expiresAt"`
+	ChannelID           string          `json:"channelId"`
+	CreatorRole         string          `json:"creatorRole"`
+	Algorithm           string          `json:"algorithm"`
+	MinterPublicKeyJWK  json.RawMessage `json:"minterPublicKeyJwk,omitempty"`
+	BrowserPublicKeyJWK json.RawMessage `json:"browserPublicKeyJwk,omitempty"`
+	Origin              string          `json:"origin,omitempty"`
+	BrowserInfo         json.RawMessage `json:"browserInfo,omitempty"`
+	ExpiresAt           string          `json:"expiresAt"`
 }
 
 type AppendMessageRequest struct {
@@ -193,8 +223,16 @@ type AppendMessageResponse struct {
 
 type PollMessagesResponse struct {
 	ChannelID string          `json:"channelId"`
+	Status    string          `json:"status"`
 	ExpiresAt string          `json:"expiresAt"`
+	Peer      *PeerInfo       `json:"peer"`
 	Messages  []MessageRecord `json:"messages"`
+}
+
+// PeerInfo is the other participant of a channel once it has joined.
+type PeerInfo struct {
+	Role         string          `json:"role"`
+	PublicKeyJWK json.RawMessage `json:"publicKeyJwk"`
 }
 
 type shortCodeAttemptRecord struct {
@@ -208,6 +246,7 @@ func main() {
 		Addr:          getenv("ADDR", defaultAddr),
 		DBPath:        getenv("BROKER_DB_PATH", defaultDBPath),
 		BrokerBaseURL: os.Getenv("BROKER_BASE_URL"),
+		TrustProxy:    getenv("BROKER_TRUST_PROXY", "false") == "true",
 	}
 	broker, err := NewBroker(cfg)
 	if err != nil {
@@ -241,6 +280,7 @@ func NewBroker(cfg Config) (*Broker, error) {
 	b := &Broker{
 		db:            db,
 		brokerBaseURL: strings.TrimRight(cfg.BrokerBaseURL, "/"),
+		trustProxy:    cfg.TrustProxy,
 		now:           cfg.Now,
 	}
 	if b.now == nil {
@@ -283,7 +323,7 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if status == 0 {
 		status = http.StatusOK
 	}
-	log.Printf("broker_http method=%s path=%s status=%d duration_ms=%d remote=%s", r.Method, r.URL.Path, status, time.Since(start).Milliseconds(), remoteHost(r.RemoteAddr))
+	log.Printf("broker_http method=%s path=%s status=%d duration_ms=%d remote=%s", r.Method, r.URL.Path, status, time.Since(start).Milliseconds(), b.clientHost(r))
 }
 
 func (b *Broker) serveHTTP(w http.ResponseWriter, r *http.Request) {
@@ -367,7 +407,8 @@ func (b *Broker) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if req.Algorithm != algorithm || !validJSONObject(req.MinterPublicKeyJWK, maxPublicKeyJWKBytes) {
+	creatorRole, ok := validateCreateRequest(&req, r.Header.Get("Origin"))
+	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -379,7 +420,7 @@ func (b *Broker) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	channelID, minterToken, pairingToken, err := newChannelMaterial()
+	channelID, creatorToken, pairingToken, err := newChannelMaterial(creatorRole)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "invalid_request")
 		return
@@ -387,20 +428,46 @@ func (b *Broker) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 	now := b.now().UTC()
 	expiresAt := now.Add(time.Duration(req.IdleTTLSeconds) * time.Second)
 	record := ChannelRecord{
-		ChannelID:          channelID,
-		Version:            1,
-		Status:             statusWaiting,
-		Algorithm:          algorithm,
-		CreatedAt:          formatTime(now),
-		LastMessageAt:      formatTime(now),
-		ExpiresAt:          formatTime(expiresAt),
-		IdleTTLSeconds:     req.IdleTTLSeconds,
-		MinterPublicKeyJWK: cloneRaw(req.MinterPublicKeyJWK),
-		PairingTokenHash:   hashString(pairingToken),
+		ChannelID:        channelID,
+		Version:          1,
+		Status:           statusWaiting,
+		Algorithm:        algorithm,
+		CreatorRole:      creatorRole,
+		CreatedAt:        formatTime(now),
+		LastMessageAt:    formatTime(now),
+		ExpiresAt:        formatTime(expiresAt),
+		IdleTTLSeconds:   req.IdleTTLSeconds,
+		PairingTokenHash: hashString(pairingToken),
+	}
+	if creatorRole == roleBrowser {
+		record.BrowserPublicKeyJWK = cloneRaw(req.BrowserPublicKeyJWK)
+		record.Origin = req.Origin
+		record.BrowserInfo = cloneRaw(req.BrowserInfo)
+	} else {
+		record.MinterPublicKeyJWK = cloneRaw(req.MinterPublicKeyJWK)
 	}
 
 	var shortCode string
+	var status int
+	var code string
 	if err := b.db.Update(func(tx *bolt.Tx) error {
+		if creatorRole == roleBrowser {
+			// Site-created channels are rate limited per source host with the
+			// same window and thresholds as the short-code resolve aggregate
+			// limit. Minter-created channels keep today's behaviour.
+			attemptKey := createSourceAttemptKey(sourceKey(b.clientHost(r)))
+			limited, err := rateLimitAttempt(tx, attemptKey, now)
+			if err != nil {
+				return err
+			}
+			if limited {
+				status, code = http.StatusTooManyRequests, "rate_limited"
+				return nil
+			}
+			if err := recordAttemptMiss(tx, attemptKey, now); err != nil {
+				return err
+			}
+		}
 		channels := tx.Bucket([]byte(bucketChannels))
 		if existing := channels.Bucket([]byte(channelID)); existing != nil {
 			return errors.New("channel id collision")
@@ -433,13 +500,13 @@ func (b *Broker) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 		if err := putJSON(metaBucket, []byte(recordKey), record); err != nil {
 			return err
 		}
-		minter := ParticipantRecord{
+		creator := ParticipantRecord{
 			ChannelID: channelID,
-			Role:      roleMinter,
-			TokenHash: hashString(minterToken),
+			Role:      creatorRole,
+			TokenHash: hashString(creatorToken),
 			CreatedAt: formatTime(now),
 		}
-		if err := putJSON(participantsBucket, []byte(roleMinter), minter); err != nil {
+		if err := putJSON(participantsBucket, []byte(creatorRole), creator); err != nil {
 			return err
 		}
 		if err := tx.Bucket([]byte(bucketPairingTokens)).Put([]byte(record.PairingTokenHash), []byte(channelID)); err != nil {
@@ -450,8 +517,113 @@ func (b *Broker) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "invalid_request")
 		return
 	}
+	if code != "" {
+		log.Printf("create_channel creator_role=%s origin_host=%s status=%d outcome=%s remote=%s", creatorRole, originHost(record.Origin), status, code, b.clientHost(r))
+		writeError(w, status, code)
+		return
+	}
 
-	qrPayload, err := json.Marshal(struct {
+	qrPayload, err := b.qrPayload(r, record, pairingToken, shortCode)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "invalid_request")
+		return
+	}
+
+	log.Printf(
+		"create_channel channel_id=%s creator_role=%s origin_host=%s short_code_requested=%t short_code_issued=%t short_code_hash=%s expires_at=%s idle_ttl_seconds=%d",
+		logEdge(channelID),
+		creatorRole,
+		originHost(record.Origin),
+		req.ShortCodeRequested,
+		shortCode != "",
+		logHashPrefix(record.ShortCodeHash),
+		record.ExpiresAt,
+		req.IdleTTLSeconds,
+	)
+	response := CreateChannelResponse{
+		ChannelID:    channelID,
+		CreatorRole:  creatorRole,
+		PairingToken: pairingToken,
+		ShortCode:    shortCode,
+		ExpiresAt:    record.ExpiresAt,
+		QRPayload:    qrPayload,
+	}
+	if creatorRole == roleBrowser {
+		response.BrowserToken = creatorToken
+	} else {
+		response.MinterToken = creatorToken
+	}
+	writeJSON(w, http.StatusCreated, response)
+}
+
+// validateCreateRequest checks the role-specific create fields and returns the
+// creator role. For a browser creator it attests the site origin from the HTTP
+// Origin header: the body origin must equal it or be absent, and req.Origin is
+// set to the attested value.
+func validateCreateRequest(req *CreateChannelRequest, headerOrigin string) (string, bool) {
+	if req.Algorithm != algorithm {
+		return "", false
+	}
+	switch req.CreatorRole {
+	case "", roleMinter:
+		if !validJSONObject(req.MinterPublicKeyJWK, maxPublicKeyJWKBytes) {
+			return "", false
+		}
+		if rawPresent(req.BrowserPublicKeyJWK) || req.Origin != "" || rawPresent(req.BrowserInfo) {
+			return "", false
+		}
+		return roleMinter, true
+	case roleBrowser:
+		if !validJSONObject(req.BrowserPublicKeyJWK, maxPublicKeyJWKBytes) || rawPresent(req.MinterPublicKeyJWK) {
+			return "", false
+		}
+		if !validOptionalJSONObject(req.BrowserInfo, maxBrowserInfoBytes) {
+			return "", false
+		}
+		if !validAttestedOrigin(headerOrigin) {
+			return "", false
+		}
+		if req.Origin != "" && req.Origin != headerOrigin {
+			return "", false
+		}
+		req.Origin = headerOrigin
+		return roleBrowser, true
+	default:
+		return "", false
+	}
+}
+
+// qrPayload builds the pairing payload returned to the channel creator: v1 for
+// a minter creator (displayed on the FF1), v2 for a browser creator.
+func (b *Broker) qrPayload(r *http.Request, record ChannelRecord, pairingToken, shortCode string) (json.RawMessage, error) {
+	if record.CreatorRole == roleBrowser {
+		return json.Marshal(struct {
+			Version             int             `json:"v"`
+			Type                string          `json:"type"`
+			CreatorRole         string          `json:"creatorRole"`
+			BrokerBaseURL       string          `json:"brokerBaseUrl"`
+			ChannelID           string          `json:"channelId"`
+			PairingToken        string          `json:"pairingToken"`
+			ShortCode           string          `json:"shortCode,omitempty"`
+			ExpiresAt           string          `json:"expiresAt"`
+			Algorithm           string          `json:"algorithm"`
+			BrowserPublicKeyJWK json.RawMessage `json:"browserPublicKeyJwk"`
+			Origin              string          `json:"origin"`
+		}{
+			Version:             2,
+			Type:                "ff-mint-pairing",
+			CreatorRole:         roleBrowser,
+			BrokerBaseURL:       b.baseURL(r),
+			ChannelID:           record.ChannelID,
+			PairingToken:        pairingToken,
+			ShortCode:           shortCode,
+			ExpiresAt:           record.ExpiresAt,
+			Algorithm:           algorithm,
+			BrowserPublicKeyJWK: record.BrowserPublicKeyJWK,
+			Origin:              record.Origin,
+		})
+	}
+	return json.Marshal(struct {
 		Version            int             `json:"v"`
 		Type               string          `json:"type"`
 		BrokerBaseURL      string          `json:"brokerBaseUrl"`
@@ -465,35 +637,12 @@ func (b *Broker) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 		Version:            1,
 		Type:               "ff-mint-pairing",
 		BrokerBaseURL:      b.baseURL(r),
-		ChannelID:          channelID,
+		ChannelID:          record.ChannelID,
 		PairingToken:       pairingToken,
 		ShortCode:          shortCode,
 		ExpiresAt:          record.ExpiresAt,
 		Algorithm:          algorithm,
 		MinterPublicKeyJWK: record.MinterPublicKeyJWK,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "invalid_request")
-		return
-	}
-
-	log.Printf(
-		"create_channel channel_id=%s short_code_requested=%t short_code_issued=%t short_code=%s short_code_hash=%s expires_at=%s idle_ttl_seconds=%d",
-		logEdge(channelID),
-		req.ShortCodeRequested,
-		shortCode != "",
-		logEdge(shortCode),
-		logHashPrefix(record.ShortCodeHash),
-		record.ExpiresAt,
-		req.IdleTTLSeconds,
-	)
-	writeJSON(w, http.StatusCreated, CreateChannelResponse{
-		ChannelID:    channelID,
-		MinterToken:  minterToken,
-		PairingToken: pairingToken,
-		ShortCode:    shortCode,
-		ExpiresAt:    record.ExpiresAt,
-		QRPayload:    qrPayload,
 	})
 }
 
@@ -503,34 +652,29 @@ func (b *Broker) handleJoinChannel(w http.ResponseWriter, r *http.Request, chann
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if !validJSONObject(req.BrowserPublicKeyJWK, maxPublicKeyJWKBytes) || !validJoinCredential(req) {
-		writeError(w, http.StatusBadRequest, "invalid_request")
-		return
-	}
-	if !validOptionalOrigin(req.Origin) || !validOptionalJSONObject(req.BrowserInfo, maxBrowserInfoBytes) {
+	if !validJoinCredential(req) || !validJoinFieldShapes(req) {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
 
-	browserToken, err := randomToken("bt_", 32)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "invalid_request")
-		return
-	}
 	now := b.now().UTC()
 	var response JoinChannelResponse
 	var status int
 	var code string
-	err = b.db.Update(func(tx *bolt.Tx) error {
-		channel, metaBucket, participantsBucket, _, ok := channelBuckets(tx, channelID)
+	err := b.db.Update(func(tx *bolt.Tx) error {
+		_, metaBucket, participantsBucket, _, ok := channelBuckets(tx, channelID)
 		if !ok {
 			status, code = http.StatusNotFound, "not_found"
 			return nil
 		}
-		_ = channel
 		record, err := loadChannelRecord(metaBucket)
 		if err != nil {
 			return err
+		}
+		joinerRole := oppositeRole(channelCreatorRole(record))
+		if !joinFieldsMatchRole(req, joinerRole) {
+			status, code = http.StatusBadRequest, "invalid_request"
+			return nil
 		}
 		expired, err := markExpiredIfNeeded(tx, metaBucket, &record, now)
 		if err != nil {
@@ -570,24 +714,32 @@ func (b *Broker) handleJoinChannel(w http.ResponseWriter, r *http.Request, chann
 			status, code = http.StatusUnauthorized, "unauthorized"
 			return nil
 		}
-		if participantsBucket.Get([]byte(roleBrowser)) != nil {
+		if participantsBucket.Get([]byte(joinerRole)) != nil {
 			status, code = http.StatusUnauthorized, "unauthorized"
 			return nil
+		}
+		joinerToken, err := participantToken(joinerRole)
+		if err != nil {
+			return err
 		}
 		record.Status = statusPaired
 		record.PairedAt = formatTime(now)
 		record.PairingConsumedAt = formatTime(now)
-		record.BrowserPublicKeyJWK = cloneRaw(req.BrowserPublicKeyJWK)
+		if joinerRole == roleBrowser {
+			record.BrowserPublicKeyJWK = cloneRaw(req.BrowserPublicKeyJWK)
+		} else {
+			record.MinterPublicKeyJWK = cloneRaw(req.MinterPublicKeyJWK)
+		}
 		if err := putJSON(metaBucket, []byte(recordKey), record); err != nil {
 			return err
 		}
-		browser := ParticipantRecord{
+		joiner := ParticipantRecord{
 			ChannelID: channelID,
-			Role:      roleBrowser,
-			TokenHash: hashString(browserToken),
+			Role:      joinerRole,
+			TokenHash: hashString(joinerToken),
 			CreatedAt: formatTime(now),
 		}
-		if err := putJSON(participantsBucket, []byte(roleBrowser), browser); err != nil {
+		if err := putJSON(participantsBucket, []byte(joinerRole), joiner); err != nil {
 			return err
 		}
 		if err := tx.Bucket([]byte(bucketPairingTokens)).Delete([]byte(record.PairingTokenHash)); err != nil {
@@ -604,12 +756,20 @@ func (b *Broker) handleJoinChannel(w http.ResponseWriter, r *http.Request, chann
 			}
 		}
 		response = JoinChannelResponse{
-			ChannelID:          channelID,
-			BrowserToken:       browserToken,
-			Algorithm:          record.Algorithm,
-			MinterPublicKeyJWK: cloneRaw(record.MinterPublicKeyJWK),
-			ExpiresAt:          record.ExpiresAt,
-			NextSeq:            1,
+			ChannelID: channelID,
+			Role:      joinerRole,
+			Algorithm: record.Algorithm,
+			ExpiresAt: record.ExpiresAt,
+			NextSeq:   1,
+		}
+		if joinerRole == roleBrowser {
+			response.BrowserToken = joinerToken
+			response.MinterPublicKeyJWK = cloneRaw(record.MinterPublicKeyJWK)
+		} else {
+			response.MinterToken = joinerToken
+			response.BrowserPublicKeyJWK = cloneRaw(record.BrowserPublicKeyJWK)
+			response.Origin = record.Origin
+			response.BrowserInfo = cloneRaw(record.BrowserInfo)
 		}
 		return nil
 	})
@@ -637,7 +797,7 @@ func (b *Broker) handleResolvePairingCode(w http.ResponseWriter, r *http.Request
 
 	now := b.now().UTC()
 	shortCodeHash := hashString(req.ShortCode)
-	resolveSourceKey := shortCodeResolveSourceKey(r.RemoteAddr)
+	resolveSourceKey := sourceKey(b.clientHost(r))
 	var response ResolvePairingCodeResponse
 	var status int
 	var code string
@@ -694,11 +854,19 @@ func (b *Broker) handleResolvePairingCode(w http.ResponseWriter, r *http.Request
 		if err := tx.Bucket([]byte(bucketShortCodeAttempts)).Delete([]byte(attemptKey)); err != nil {
 			return err
 		}
+		creatorRole := channelCreatorRole(record)
 		response = ResolvePairingCodeResponse{
-			ChannelID:          channelID,
-			Algorithm:          record.Algorithm,
-			MinterPublicKeyJWK: cloneRaw(record.MinterPublicKeyJWK),
-			ExpiresAt:          record.ExpiresAt,
+			ChannelID:   channelID,
+			CreatorRole: creatorRole,
+			Algorithm:   record.Algorithm,
+			ExpiresAt:   record.ExpiresAt,
+		}
+		if creatorRole == roleBrowser {
+			response.BrowserPublicKeyJWK = cloneRaw(record.BrowserPublicKeyJWK)
+			response.Origin = record.Origin
+			response.BrowserInfo = cloneRaw(record.BrowserInfo)
+		} else {
+			response.MinterPublicKeyJWK = cloneRaw(record.MinterPublicKeyJWK)
 		}
 		return nil
 	})
@@ -708,24 +876,22 @@ func (b *Broker) handleResolvePairingCode(w http.ResponseWriter, r *http.Request
 	}
 	if code != "" {
 		log.Printf(
-			"resolve_pairing_code short_code=%s short_code_hash=%s status=%d outcome=%s channel_id=%s remote=%s",
-			logEdge(req.ShortCode),
+			"resolve_pairing_code short_code_hash=%s status=%d outcome=%s channel_id=%s remote=%s",
 			logHashPrefix(shortCodeHash),
 			status,
 			code,
 			logEdge(resolvedChannelID),
-			remoteHost(r.RemoteAddr),
+			b.clientHost(r),
 		)
 		writeError(w, status, code)
 		return
 	}
 	log.Printf(
-		"resolve_pairing_code short_code=%s short_code_hash=%s status=%d outcome=resolved channel_id=%s remote=%s",
-		logEdge(req.ShortCode),
+		"resolve_pairing_code short_code_hash=%s status=%d outcome=resolved channel_id=%s remote=%s",
 		logHashPrefix(shortCodeHash),
 		http.StatusOK,
 		logEdge(response.ChannelID),
-		remoteHost(r.RemoteAddr),
+		b.clientHost(r),
 	)
 	writeJSON(w, http.StatusOK, response)
 }
@@ -895,7 +1061,9 @@ func (b *Broker) handlePollMessages(w http.ResponseWriter, r *http.Request, chan
 		}
 		response = PollMessagesResponse{
 			ChannelID: channelID,
+			Status:    record.Status,
 			ExpiresAt: record.ExpiresAt,
+			Peer:      channelPeer(participantsBucket, record, oppositeRole(role)),
 			Messages:  make([]MessageRecord, 0),
 		}
 		cursor := messagesBucket.Cursor()
@@ -1135,6 +1303,91 @@ func validJoinCredential(req JoinChannelRequest) bool {
 	return validShortCode(req.ShortCode)
 }
 
+// validJoinFieldShapes checks the size and shape of every join field that is
+// present. Which fields a join must carry depends on the channel's creator role
+// and is checked against the stored record by joinFieldsMatchRole.
+func validJoinFieldShapes(req JoinChannelRequest) bool {
+	if rawPresent(req.BrowserPublicKeyJWK) && !validJSONObject(req.BrowserPublicKeyJWK, maxPublicKeyJWKBytes) {
+		return false
+	}
+	if rawPresent(req.MinterPublicKeyJWK) && !validJSONObject(req.MinterPublicKeyJWK, maxPublicKeyJWKBytes) {
+		return false
+	}
+	if rawPresent(req.BrowserPublicKeyJWK) == rawPresent(req.MinterPublicKeyJWK) {
+		return false
+	}
+	return validOptionalOrigin(req.Origin) && validOptionalJSONObject(req.BrowserInfo, maxBrowserInfoBytes)
+}
+
+// joinFieldsMatchRole reports whether a join request carries exactly the key
+// field of the joining role. A browser joining a minter-created channel sends
+// browserPublicKeyJwk (plus optional origin and browserInfo, as today); a
+// minter joining a browser-created channel sends only minterPublicKeyJwk,
+// because the browser's key, origin and metadata were fixed at create.
+func joinFieldsMatchRole(req JoinChannelRequest, joinerRole string) bool {
+	if joinerRole == roleBrowser {
+		return rawPresent(req.BrowserPublicKeyJWK) && !rawPresent(req.MinterPublicKeyJWK)
+	}
+	return rawPresent(req.MinterPublicKeyJWK) && !rawPresent(req.BrowserPublicKeyJWK) && req.Origin == "" && !rawPresent(req.BrowserInfo)
+}
+
+// validAttestedOrigin accepts a serialized web origin as browsers send it in
+// the Origin header: http or https scheme and host, no path, query, fragment or
+// credentials. The opaque origin "null" is rejected.
+func validAttestedOrigin(origin string) bool {
+	if origin == "" || len(origin) > maxOriginBytes {
+		return false
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return false
+	}
+	return parsed.User == nil && parsed.Path == "" && parsed.RawQuery == "" && parsed.Fragment == "" && parsed.Opaque == "" && !parsed.ForceQuery && !strings.HasSuffix(origin, "#")
+}
+
+// originHost is the host of an attested origin for logs; empty when unset.
+func originHost(origin string) string {
+	if origin == "" {
+		return ""
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil {
+		return ""
+	}
+	return parsed.Host
+}
+
+// channelCreatorRole reads the creator role, treating records written before
+// the field existed as minter-created.
+func channelCreatorRole(record ChannelRecord) string {
+	if record.CreatorRole == roleBrowser {
+		return roleBrowser
+	}
+	return roleMinter
+}
+
+// channelPeer returns the given peer role's public key once that participant
+// has joined, or nil.
+func channelPeer(participants *bolt.Bucket, record ChannelRecord, peerRole string) *PeerInfo {
+	if participants.Get([]byte(peerRole)) == nil {
+		return nil
+	}
+	key := record.MinterPublicKeyJWK
+	if peerRole == roleBrowser {
+		key = record.BrowserPublicKeyJWK
+	}
+	if !rawPresent(key) {
+		return nil
+	}
+	return &PeerInfo{Role: peerRole, PublicKeyJWK: cloneRaw(key)}
+}
+
+// rawPresent treats an absent field and an explicit JSON null as not present.
+func rawPresent(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
+}
+
 func validShortCode(code string) bool {
 	if len(code) != shortCodeDigits {
 		return false
@@ -1210,12 +1463,12 @@ func validPrefixedID(value, prefix string) bool {
 	return true
 }
 
-func newChannelMaterial() (channelID, minterToken, pairingToken string, err error) {
+func newChannelMaterial(creatorRole string) (channelID, creatorToken, pairingToken string, err error) {
 	channelID, err = randomToken("ch_", 18)
 	if err != nil {
 		return "", "", "", err
 	}
-	minterToken, err = randomToken("mt_", 32)
+	creatorToken, err = participantToken(creatorRole)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -1223,7 +1476,16 @@ func newChannelMaterial() (channelID, minterToken, pairingToken string, err erro
 	if err != nil {
 		return "", "", "", err
 	}
-	return channelID, minterToken, pairingToken, nil
+	return channelID, creatorToken, pairingToken, nil
+}
+
+// participantToken issues the bearer token for a channel participant: bt_ for
+// the browser, mt_ for the minter.
+func participantToken(role string) (string, error) {
+	if role == roleBrowser {
+		return randomToken("bt_", 32)
+	}
+	return randomToken("mt_", 32)
 }
 
 func randomToken(prefix string, byteCount int) (string, error) {
@@ -1442,15 +1704,44 @@ func shortCodeResolveAggregateAttemptKey(sourceKey string) string {
 	return "resolve:source:" + sourceKey
 }
 
-func shortCodeResolveSourceKey(remoteAddr string) string {
-	source := remoteAddr
-	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
-		source = host
+// sourceKey is the durable rate-limit key for a client host. The host is
+// hashed so raw client addresses are not stored.
+func sourceKey(host string) string {
+	if host == "" {
+		host = "unknown"
 	}
-	if source == "" {
-		source = "unknown"
+	return hashString(host)
+}
+
+// clientHost is the client address used for per-source rate limits and logs.
+// Behind a trusted reverse proxy it is the last X-Forwarded-For entry: the proxy
+// appends the peer it saw, so a client can prepend entries but cannot replace the
+// last one. It falls back to the connection's remote address when the header is
+// absent or its last entry is not an IP address.
+func (b *Broker) clientHost(r *http.Request) string {
+	if b.trustProxy {
+		if host, ok := lastForwardedFor(r.Header.Values("X-Forwarded-For")); ok {
+			return host
+		}
 	}
-	return hashString(source)
+	return remoteHost(r.RemoteAddr)
+}
+
+func lastForwardedFor(values []string) (string, bool) {
+	if len(values) == 0 {
+		return "", false
+	}
+	entries := strings.Split(values[len(values)-1], ",")
+	last := strings.TrimSpace(entries[len(entries)-1])
+	if host, _, err := net.SplitHostPort(last); err == nil {
+		last = host
+	}
+	last = strings.Trim(last, "[]")
+	ip := net.ParseIP(last)
+	if ip == nil {
+		return "", false
+	}
+	return ip.String(), true
 }
 
 func remoteHost(remoteAddr string) string {
@@ -1463,6 +1754,9 @@ func remoteHost(remoteAddr string) string {
 	return remoteAddr
 }
 
+// logEdge shortens an identifier for logs. Use it for channel ids only: on a
+// six-digit short code the two edges are the whole code. Short codes are
+// logged as a hash prefix.
 func logEdge(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -1479,6 +1773,10 @@ func logHashPrefix(value string) string {
 		return value
 	}
 	return value[:12]
+}
+
+func createSourceAttemptKey(sourceKey string) string {
+	return "create:source:" + sourceKey
 }
 
 func shortCodeJoinAttemptKey(channelID string) string {

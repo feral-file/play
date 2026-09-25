@@ -4,7 +4,7 @@
 
 This repository is a minimal secure prototype for ephemeral browser session mint pairing.
 
-The target parties are an NFT display website embedding the token requester browser library, FF1 `feral-controld` using a Go ephemeral token minter library, the FF1 frontend that displays the pairing QR/code, `ff-controller` as an approval UI reached through `ff-relayer`, `ff-relayer`, and the FF1 display path. The Go minter library creates a temporary mint receiver through the server in `server/`, establishes end-to-end encrypted communication with the NFT display website, and transfers approval results or token payloads back to the NFT display website through the encrypted broker path. `feral-controld`, not the Go minter library, asks `ff-controller` to approve or reject requester metadata through `ff-relayer` and mints ephemeral browser sessions through `ff-relayer` on approval. The current token requester implementation is a browser library that stores the recovered token in `localStorage` under the current website origin and uses it to request DP1 playlist display through `ff-relayer`. DP1 playlist content must not travel through `ff-controller`, the token minter, or the server.
+The target parties are an NFT display website embedding the token requester browser library, FF1 `feral-controld` using a Go ephemeral token minter library, `ff-controller` (the Feral File app) as the surface that brings the device to the site's channel and approves the request, `ff-relayer`, and the FF1 display path. Pairing is site-initiated: the requester library creates the channel on the server in `server/` and shows an app link and short code; the app sends `joinMintPairingChannel` to the device; the Go minter library *joins* that site-created channel, establishes end-to-end encrypted communication with the NFT display website, and transfers approval results or token payloads back through the encrypted broker path. The FF1 frontend displays no pairing material in the site-initiated flow. The legacy device-initiated flow (the minter creates the channel and the FF1 frontend shows its QR/code for the site to join) is still served by the broker for requester library versions before 0.4.0. `feral-controld`, not the Go minter library, asks `ff-controller` to approve or reject requester metadata through `ff-relayer` and mints ephemeral browser sessions through `ff-relayer` on approval. The current token requester implementation is a browser library that stores the recovered token in `localStorage` under the current website origin and uses it to request DP1 playlist display through `ff-relayer`. DP1 playlist content must not travel through `ff-controller`, the token minter, or the server.
 
 The server in `server/` is now referred to in design docs as the Mint Pairing Broker rather than the handoff server. It remains a short-lived opaque E2EE transport backed by durable bbolt state in the target design.
 
@@ -13,9 +13,9 @@ The sequential flow lives in `docs/sequential-flow.md`. Component-specific rules
 ## Directory Structure
 
 - `docs/`: shared architecture, flow, server design, and API design documentation.
-- `server/`: current Node.js/Fastify/TypeScript prototype; target design is a Go, bbolt-backed Mint Pairing Broker.
+- `server/`: the Go, bbolt-backed Mint Pairing Broker.
 - `clients/session-recipient/js/`: TypeScript token requester library embedded by NFT display websites.
-- `clients/ephemeral-token-minter/go/`: planned Go ephemeral token minter library used by FF1 `feral-controld`.
+- `clients/ephemeral-token-minter/go/`: Go ephemeral token minter library used by FF1 `feral-controld`.
 - `clients/ff-controller/flutter/`: legacy Flutter/Dart implementation from the old flow; remove or replace in the code migration.
 - `integration/`: Vitest integration tests.
 - `.github/workflows/ci.yml`: CI jobs for server, NFT display website requester library, token minter, and integration tests after the code migration.
@@ -27,11 +27,19 @@ Server:
 
 ```sh
 cd server
-npm ci
-npm run lint
-npm run typecheck
-npm test
-npm run build
+test -z "$(gofmt -l .)"
+go vet ./...
+go test ./...
+go build ./...
+```
+
+Go ephemeral token minter:
+
+```sh
+cd clients/ephemeral-token-minter/go
+test -z "$(gofmt -l .)"
+go vet ./...
+go test ./...
 ```
 
 NFT display website requester library:
@@ -107,6 +115,7 @@ Server:
 - Token hashes are stored where tokens must be persisted.
 - Expiry, revoke, duplicate claim, and oversized payload paths are covered when implemented.
 - API validation rejects malformed input.
+- Browser-created channels attest origin from the HTTP `Origin` header; minter-created (legacy) channels stay wire-compatible.
 - Server logs do not expose tokens or playlist content.
 
 NFT display website requester library:
@@ -126,8 +135,9 @@ NFT display website requester library:
 
 Ephemeral token minter:
 
-- Starts temporary mint receivers through the Mint Pairing Broker.
-- Provides QR/deep-link and short-code pairing material for the FF1 frontend to display.
+- Joins site-created channels through the Mint Pairing Broker by pairing token or short code, and exposes the broker-attested origin and browser info.
+- Rejects a mint request whose origin or browser key differs from what the broker attested at join.
+- Legacy path: starts channels and provides QR/deep-link and short-code pairing material for the FF1 frontend to display.
 - Receives requester origin and browser/client metadata through E2EE.
 - Does not call `ff-controller` or `ff-relayer`; `feral-controld` owns approval and session creation.
 - Sends host-provided minted token information back only through the E2EE broker path.

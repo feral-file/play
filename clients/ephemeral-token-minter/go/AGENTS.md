@@ -4,7 +4,7 @@
 
 `clients/ephemeral-token-minter/go/` is the Go ephemeral token minter library embedded by FF1 `feral-controld`.
 
-It creates temporary channels through the Mint Pairing Broker, exposes QR/deep-link and short-code pairing material for the FF1 frontend, decrypts browser mint requests, and sends encrypted success or rejection results back through the broker.
+It joins channels that NFT display websites create on the Mint Pairing Broker (`JoinChannel`, by pairing token or short code), exposes the origin and browser info the broker attested, decrypts browser mint requests, checks that a joined channel's mint request matches the attested origin and browser key, and sends encrypted success or rejection results back through the broker. For the legacy device-initiated flow it still creates channels (`StartChannel`) and exposes QR/deep-link and short-code pairing material for the FF1 frontend.
 
 ## Commands
 

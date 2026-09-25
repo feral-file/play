@@ -36,6 +36,24 @@ type StartChannelOptions struct {
 	ShortCodeRequested bool
 }
 
+// JoinChannelOptions joins a channel a browser created. Exactly one of
+// PairingToken or ShortCode is set. ChannelID is required with PairingToken;
+// with ShortCode the client resolves the code first.
+type JoinChannelOptions struct {
+	BrokerBaseURL string
+	ChannelID     string
+	PairingToken  string
+	ShortCode     string
+}
+
+// JoinedRequester is what the broker attested at join time: the site origin
+// taken from the browser's HTTP Origin header when it created the channel, and
+// the requester metadata it sent with the create.
+type JoinedRequester struct {
+	Origin      string
+	BrowserInfo BrowserInfo
+}
+
 // PairingDisplay is safe to pass to the FF1 frontend for QR/deep-link or
 // short-code display.
 type PairingDisplay struct {
@@ -219,6 +237,32 @@ type createChannelResponse struct {
 	ShortCode    string          `json:"shortCode"`
 	ExpiresAt    time.Time       `json:"expiresAt"`
 	QRPayload    json.RawMessage `json:"qrPayload"`
+}
+
+type resolvePairingCodeRequest struct {
+	ShortCode string `json:"shortCode"`
+}
+
+type resolvePairingCodeResponse struct {
+	ChannelID   string `json:"channelId"`
+	CreatorRole string `json:"creatorRole"`
+}
+
+type joinChannelRequest struct {
+	PairingToken       string    `json:"pairingToken,omitempty"`
+	ShortCode          string    `json:"shortCode,omitempty"`
+	MinterPublicKeyJWK PublicJWK `json:"minterPublicKeyJwk"`
+}
+
+type joinChannelResponse struct {
+	ChannelID           string          `json:"channelId"`
+	Role                string          `json:"role"`
+	MinterToken         string          `json:"minterToken"`
+	Algorithm           string          `json:"algorithm"`
+	BrowserPublicKeyJWK *PublicJWK      `json:"browserPublicKeyJwk"`
+	Origin              string          `json:"origin"`
+	BrowserInfo         json.RawMessage `json:"browserInfo,omitempty"`
+	ExpiresAt           time.Time       `json:"expiresAt"`
 }
 
 type pollMessagesResponse struct {
