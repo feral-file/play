@@ -46,8 +46,9 @@ browser request.
 
 ## QR Pairing Token
 
-The QR/deep-link payload is intentionally not encrypted. It is bootstrap data
-that lets the NFT display website join the channel.
+The QR/deep-link payload is intentionally not encrypted. It is one-time
+bootstrap data for whichever party joins: the Art Computer's minter for a
+site-created channel, the NFT display website for a legacy minter-created one.
 
 Legacy (minter-created) QR payload, displayed on the FF1:
 
