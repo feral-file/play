@@ -747,11 +747,17 @@ async function completeMint(input: {
   // One approval deadline covers the request POST and every result poll, so
   // a broker request that never resolves still ends in approval_timeout.
   const deadline = Date.now() + input.maxWaitMs;
+  // A cancel during encryption fired before any listener existed and is not
+  // replayed: check now, so a canceled visitor never reaches device approval.
+  throwIfAborted(context.signal);
   const approvalController = new AbortController();
   const abortApproval = (): void => {
     approvalController.abort();
   };
   context.signal?.addEventListener("abort", abortApproval, { once: true });
+  if (context.signal?.aborted === true) {
+    approvalController.abort();
+  }
   const deadlineTimer = setTimeout(abortApproval, Math.max(0, input.maxWaitMs));
   const timedOut = (): PlayError => new PlayError("poll timed out", "approval_timeout");
   try {

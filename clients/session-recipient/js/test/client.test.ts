@@ -569,6 +569,21 @@ describe("requestEphemeralSession", () => {
     expect(session.sessionId).toBe("sess_123");
   });
 
+  it("does not post the mint_request when the visitor cancels during encryption", async () => {
+    const broker = await fakeBroker();
+    const controller = new AbortController();
+    const subtle = globalThis.crypto.subtle;
+    const realEncrypt = subtle.encrypt.bind(subtle);
+    vi.spyOn(subtle, "encrypt").mockImplementation((...args: Parameters<SubtleCrypto["encrypt"]>) => {
+      controller.abort();
+      return realEncrypt(...args);
+    });
+    const error = await captureError(requestEphemeralSession(baseOptions(broker.fetchImpl, { signal: controller.signal })));
+    expect((error as PlayError).code).toBe("pairing_canceled");
+    expect(broker.fetchImpl.mock.calls.some(([input, init]) => init?.method === "POST" && requestUrl(input).endsWith("/messages"))).toBe(false);
+    expect(broker.mintRequests).toEqual([]);
+  });
+
   it("honours a cancel that lands while the result is being read, without storing", async () => {
     const broker = await fakeBroker();
     const storage = memoryStorage();
