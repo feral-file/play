@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdh"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -684,4 +685,317 @@ func readRequestBody(t *testing.T, r *http.Request) string {
 		t.Fatal(err)
 	}
 	return string(body)
+}
+
+const joinTestOrigin = "https://www.artblocks.io"
+
+// joinHarness is an httptest broker stub for a browser-created channel that the
+// minter joins.
+type joinHarness struct {
+	t            *testing.T
+	server       *httptest.Server
+	browserKey   *ecdh.PrivateKey
+	browserJWK   PublicJWK
+	origin       string
+	resolveCalls int
+	joinBodies   []string
+	messages     []encryptedMessage
+	sentMessages []encryptedMessage
+	closed       bool
+	// joinStatus, when set, makes the join endpoint fail with that status.
+	joinStatus  int
+	joinCode    string
+	creatorRole string
+}
+
+func newJoinHarness(t *testing.T) *joinHarness {
+	t.Helper()
+	browserKey, err := generatePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	browserJWK, err := publicKeyToJWK(browserKey.PublicKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &joinHarness{t: t, browserKey: browserKey, browserJWK: browserJWK, origin: joinTestOrigin, creatorRole: "browser"}
+	h.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/pairing-codes/resolve":
+			h.resolveCalls++
+			var body resolvePairingCodeRequest
+			if err := json.Unmarshal([]byte(readRequestBody(t, r)), &body); err != nil {
+				t.Fatal(err)
+			}
+			if body.ShortCode != "123456" {
+				w.WriteHeader(http.StatusNotFound)
+				writeJSON(t, w, map[string]string{"error": "not_found"})
+				return
+			}
+			writeJSON(t, w, map[string]any{
+				"channelId":           "ch_site",
+				"creatorRole":         h.creatorRole,
+				"algorithm":           Algorithm,
+				"browserPublicKeyJwk": h.browserJWK,
+				"origin":              h.origin,
+				"expiresAt":           time.Now().Add(5 * time.Minute).UTC(),
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/channels/ch_site/join":
+			body := readRequestBody(t, r)
+			h.joinBodies = append(h.joinBodies, body)
+			if h.joinStatus != 0 {
+				w.WriteHeader(h.joinStatus)
+				writeJSON(t, w, map[string]string{"error": h.joinCode})
+				return
+			}
+			writeJSON(t, w, map[string]any{
+				"channelId":           "ch_site",
+				"role":                "minter",
+				"minterToken":         "mt_joined",
+				"algorithm":           Algorithm,
+				"browserPublicKeyJwk": h.browserJWK,
+				"origin":              h.origin,
+				"browserInfo":         map[string]string{"name": "Art Blocks", "label": "artblocks.io", "userAgent": "test", "extra": "ignored"},
+				"expiresAt":           time.Now().Add(5 * time.Minute).UTC(),
+				"nextSeq":             1,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/channels/ch_site/messages":
+			if r.Header.Get("Authorization") != "Bearer mt_joined" {
+				t.Fatalf("poll authorization = %q", r.Header.Get("Authorization"))
+			}
+			writeJSON(t, w, pollMessagesResponse{ChannelID: "ch_site", ExpiresAt: time.Now().Add(5 * time.Minute).UTC(), Messages: h.messages})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/channels/ch_site/messages":
+			if r.Header.Get("Authorization") != "Bearer mt_joined" {
+				t.Fatalf("send authorization = %q", r.Header.Get("Authorization"))
+			}
+			var message encryptedMessage
+			if err := json.Unmarshal([]byte(readRequestBody(t, r)), &message); err != nil {
+				t.Fatal(err)
+			}
+			h.sentMessages = append(h.sentMessages, message)
+			writeJSON(t, w, sendMessageResponse{ChannelID: "ch_site", Seq: 2, ExpiresAt: time.Now().Add(5 * time.Minute).UTC()})
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/channels/ch_site":
+			if r.Header.Get("Authorization") != "Bearer mt_joined" {
+				t.Fatalf("close authorization = %q", r.Header.Get("Authorization"))
+			}
+			h.closed = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(h.server.Close)
+	return h
+}
+
+func (h *joinHarness) join(t *testing.T, opts JoinChannelOptions) *Channel {
+	t.Helper()
+	opts.BrokerBaseURL = h.server.URL
+	channel, err := NewClient(h.server.Client()).JoinChannel(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return channel
+}
+
+// mintRequest encrypts a browser mint_request to the joined minter with the
+// given browser key and origin.
+func (h *joinHarness) mintRequest(t *testing.T, channel *Channel, browserKey *ecdh.PrivateKey, origin string) encryptedMessage {
+	t.Helper()
+	browserJWK, err := publicKeyToJWK(browserKey.PublicKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	aad := envelopeAAD{Version: 1, ChannelID: "ch_site", MessageID: "msg_browser", Seq: 1, Sender: "browser", Recipient: "minter", Algorithm: Algorithm}
+	message, err := encryptJSON(browserKey, channel.MinterPublicKeyJWK(), aad, mintRequestPlaintext{
+		Version:                    1,
+		Type:                       messageTypeMintRequest,
+		ChannelID:                  "ch_site",
+		RequestMessageID:           "msg_browser",
+		Origin:                     origin,
+		BrowserInfo:                BrowserInfo{Name: "Art Blocks"},
+		BrowserPublicKeyJWK:        browserJWK,
+		SupportsPersistentSessions: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message.Seq = 1
+	message.SenderPublicKeyJWK = &browserJWK
+	return message
+}
+
+func TestJoinChannelWithPairingToken(t *testing.T) {
+	h := newJoinHarness(t)
+	channel := h.join(t, JoinChannelOptions{ChannelID: "ch_site", PairingToken: "pt_secret"})
+
+	if h.resolveCalls != 0 {
+		t.Fatalf("pairing-token join resolved a code %d times", h.resolveCalls)
+	}
+	if len(h.joinBodies) != 1 {
+		t.Fatalf("join calls = %d, want 1", len(h.joinBodies))
+	}
+	var joinBody map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(h.joinBodies[0]), &joinBody); err != nil {
+		t.Fatal(err)
+	}
+	if string(joinBody["pairingToken"]) != `"pt_secret"` || joinBody["minterPublicKeyJwk"] == nil {
+		t.Fatalf("join body = %s", h.joinBodies[0])
+	}
+	for _, field := range []string{"shortCode", "browserPublicKeyJwk", "origin", "browserInfo"} {
+		if _, ok := joinBody[field]; ok {
+			t.Fatalf("join body carries %s: %s", field, h.joinBodies[0])
+		}
+	}
+
+	requester := channel.Requester()
+	if requester.Origin != joinTestOrigin || requester.BrowserInfo.Name != "Art Blocks" || requester.BrowserInfo.Label != "artblocks.io" {
+		t.Fatalf("requester = %#v", requester)
+	}
+	if channel.ChannelID() != "ch_site" {
+		t.Fatalf("channel id = %q", channel.ChannelID())
+	}
+	if display := channel.PairingDisplay(); display.ChannelID != "" || display.ShortCode != "" || display.QRPayload != nil || !display.ExpiresAt.IsZero() {
+		t.Fatalf("joined channel display = %#v, want zero value", display)
+	}
+
+	h.messages = []encryptedMessage{h.mintRequest(t, channel, h.browserKey, joinTestOrigin)}
+	request, err := channel.PollMintRequest(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request == nil || request.Origin != joinTestOrigin || request.ChannelID != "ch_site" || !request.SupportsPersistentSessions {
+		t.Fatalf("mint request = %#v", request)
+	}
+
+	if _, err := channel.SendMintSuccess(context.Background(), *request, MintResult{SessionID: "ses_1", Token: "eph_token", Persistent: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.sentMessages) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(h.sentMessages))
+	}
+	plaintext, aad, err := decryptMessage(h.browserKey, h.sentMessages[0], channel.MinterPublicKeyJWK())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aad.Sender != "minter" || aad.Recipient != "browser" || !strings.Contains(string(plaintext), `"eph_token"`) {
+		t.Fatalf("success payload aad=%#v plaintext=%s", aad, plaintext)
+	}
+	if err := channel.Close(context.Background()); err != nil || !h.closed {
+		t.Fatalf("close err=%v closed=%t", err, h.closed)
+	}
+}
+
+func TestJoinChannelWithShortCode(t *testing.T) {
+	h := newJoinHarness(t)
+	channel := h.join(t, JoinChannelOptions{ShortCode: "123456"})
+	if h.resolveCalls != 1 || len(h.joinBodies) != 1 {
+		t.Fatalf("resolve/join calls = %d/%d, want 1/1", h.resolveCalls, len(h.joinBodies))
+	}
+	var joinBody map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(h.joinBodies[0]), &joinBody); err != nil {
+		t.Fatal(err)
+	}
+	if string(joinBody["shortCode"]) != `"123456"` || joinBody["pairingToken"] != nil {
+		t.Fatalf("join body = %s", h.joinBodies[0])
+	}
+	if channel.ChannelID() != "ch_site" || channel.Requester().Origin != joinTestOrigin {
+		t.Fatalf("joined channel id/origin = %q/%q", channel.ChannelID(), channel.Requester().Origin)
+	}
+}
+
+func TestJoinChannelRejectsMinterCreatedShortCode(t *testing.T) {
+	h := newJoinHarness(t)
+	h.creatorRole = "minter"
+	_, err := NewClient(h.server.Client()).JoinChannel(context.Background(), JoinChannelOptions{BrokerBaseURL: h.server.URL, ShortCode: "123456"})
+	if err == nil || len(h.joinBodies) != 0 {
+		t.Fatalf("join of a minter-created code err=%v joins=%d, want error before join", err, len(h.joinBodies))
+	}
+}
+
+func TestPollMintRequestRejectsOriginMismatchOnJoinedChannel(t *testing.T) {
+	h := newJoinHarness(t)
+	channel := h.join(t, JoinChannelOptions{ChannelID: "ch_site", PairingToken: "pt_secret"})
+	h.messages = []encryptedMessage{h.mintRequest(t, channel, h.browserKey, "https://evil.example")}
+	request, err := channel.PollMintRequest(context.Background(), 0)
+	if !errors.Is(err, ErrOriginMismatch) || request != nil {
+		t.Fatalf("PollMintRequest = %#v, %v; want ErrOriginMismatch", request, err)
+	}
+}
+
+func TestPollMintRequestRejectsBrowserKeyMismatchOnJoinedChannel(t *testing.T) {
+	h := newJoinHarness(t)
+	channel := h.join(t, JoinChannelOptions{ChannelID: "ch_site", PairingToken: "pt_secret"})
+	otherKey, err := generatePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Envelope and plaintext agree on the other key, so only the comparison
+	// against the key the broker returned at join catches it.
+	h.messages = []encryptedMessage{h.mintRequest(t, channel, otherKey, joinTestOrigin)}
+	request, err := channel.PollMintRequest(context.Background(), 0)
+	if !errors.Is(err, ErrBrowserKeyMismatch) || request != nil {
+		t.Fatalf("PollMintRequest = %#v, %v; want ErrBrowserKeyMismatch", request, err)
+	}
+}
+
+func TestCreatedChannelHasNoRequester(t *testing.T) {
+	h := newChannelHarness(t)
+	if requester := h.channel.Requester(); requester != (JoinedRequester{}) {
+		t.Fatalf("created channel requester = %#v, want zero value", requester)
+	}
+	// A created channel keeps accepting whatever origin the request names.
+	plaintext := h.validMintRequestPlaintext("msg_browser")
+	plaintext.Origin = "https://other.example"
+	h.messages = []encryptedMessage{h.encryptBrowserMessage(t, "msg_browser", 1, plaintext)}
+	request, err := h.channel.PollMintRequest(context.Background(), 0)
+	if err != nil || request == nil || request.Origin != "https://other.example" {
+		t.Fatalf("created channel poll = %#v, %v", request, err)
+	}
+}
+
+func TestJoinChannelBrokerErrorsCarryStatus(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		code   string
+	}{
+		{http.StatusNotFound, "not_found"},
+		{http.StatusGone, "expired"},
+		{http.StatusUnauthorized, "unauthorized"},
+		{http.StatusTooManyRequests, "rate_limited"},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			h := newJoinHarness(t)
+			h.joinStatus, h.joinCode = tc.status, tc.code
+			_, err := NewClient(h.server.Client()).JoinChannel(context.Background(), JoinChannelOptions{BrokerBaseURL: h.server.URL, ChannelID: "ch_site", PairingToken: "pt_secret"})
+			var brokerErr *BrokerError
+			if !errors.As(err, &brokerErr) || brokerErr.StatusCode != tc.status || brokerErr.Code != tc.code {
+				t.Fatalf("err = %v (%#v), want BrokerError %d/%s", err, brokerErr, tc.status, tc.code)
+			}
+		})
+	}
+
+	h := newJoinHarness(t)
+	_, err := NewClient(h.server.Client()).JoinChannel(context.Background(), JoinChannelOptions{BrokerBaseURL: h.server.URL, ShortCode: "000000"})
+	var brokerErr *BrokerError
+	if !errors.As(err, &brokerErr) || brokerErr.StatusCode != http.StatusNotFound || len(h.joinBodies) != 0 {
+		t.Fatalf("unknown short code err = %v, want 404 BrokerError before join", err)
+	}
+}
+
+func TestJoinChannelValidatesOptions(t *testing.T) {
+	client := NewClient(nil)
+	for name, opts := range map[string]JoinChannelOptions{
+		"broker url required":        {ChannelID: "ch_site", PairingToken: "pt_secret"},
+		"credential required":        {BrokerBaseURL: "https://broker.test", ChannelID: "ch_site"},
+		"both credentials":           {BrokerBaseURL: "https://broker.test", ChannelID: "ch_site", PairingToken: "pt_secret", ShortCode: "123456"},
+		"channel id with token":      {BrokerBaseURL: "https://broker.test", PairingToken: "pt_secret"},
+		"channel id with short code": {BrokerBaseURL: "https://broker.test", ChannelID: "ch_site", ShortCode: "123456"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := client.JoinChannel(context.Background(), opts); err == nil {
+				t.Fatal("expected option validation error")
+			}
+		})
+	}
 }

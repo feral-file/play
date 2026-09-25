@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"path"
@@ -30,6 +31,30 @@ func NewClient(httpClient *http.Client) *Client {
 	return &Client{httpClient: httpClient}
 }
 
+// ErrOriginMismatch is returned by PollMintRequest on a joined channel when the
+// decrypted mint request names a different origin from the one the broker
+// attested when the browser created the channel.
+var ErrOriginMismatch = errors.New("mint request origin does not match the attested channel origin")
+
+// ErrBrowserKeyMismatch is returned by PollMintRequest on a joined channel when
+// the mint request was encrypted with a browser key other than the one the
+// broker returned at join.
+var ErrBrowserKeyMismatch = errors.New("mint request browser public key does not match the joined channel key")
+
+// BrokerError is a non-2xx broker response. StatusCode and Code (the broker's
+// generic error code, such as "not_found", "expired", "unauthorized" or
+// "rate_limited") let the host map failures without parsing the message.
+type BrokerError struct {
+	Method     string
+	Path       string
+	StatusCode int
+	Code       string
+}
+
+func (e *BrokerError) Error() string {
+	return fmt.Sprintf("broker %s %s failed with status %d", e.Method, e.Path, e.StatusCode)
+}
+
 // Channel is a local minter view of one broker pairing channel.
 type Channel struct {
 	client       *Client
@@ -39,6 +64,11 @@ type Channel struct {
 	privateKey   *ecdh.PrivateKey
 	publicKeyJWK PublicJWK
 	display      PairingDisplay
+
+	// joined is set for a channel a browser created and this minter joined.
+	joined           bool
+	requester        JoinedRequester
+	joinedBrowserJWK PublicJWK
 }
 
 // StartChannel creates a temporary broker channel and returns local channel
@@ -93,6 +123,107 @@ func (c *Client) StartChannel(ctx context.Context, opts StartChannelOptions) (*C
 	}, nil
 }
 
+// JoinChannel joins a channel a browser created, bringing this minter to the
+// site's pairing request. It generates the minter key pair, resolves the short
+// code if one is given, and joins with the minter public key. The returned
+// channel polls, answers and closes exactly like a created one; it has no
+// pairing display material.
+func (c *Client) JoinChannel(ctx context.Context, opts JoinChannelOptions) (*Channel, error) {
+	if strings.TrimSpace(opts.BrokerBaseURL) == "" {
+		return nil, errors.New("broker base URL is required")
+	}
+	if (opts.PairingToken == "") == (opts.ShortCode == "") {
+		return nil, errors.New("exactly one of pairing token or short code is required")
+	}
+	if opts.PairingToken != "" && opts.ChannelID == "" {
+		return nil, errors.New("channel id is required with a pairing token")
+	}
+	if opts.ShortCode != "" && opts.ChannelID != "" {
+		return nil, errors.New("channel id must be empty with a short code; the code resolves it")
+	}
+	brokerBase, err := url.Parse(opts.BrokerBaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse broker base URL: %w", err)
+	}
+	channelID := opts.ChannelID
+	if opts.ShortCode != "" {
+		var resolved resolvePairingCodeResponse
+		if err := c.doJSON(ctx, http.MethodPost, brokerBase, "/v1/pairing-codes/resolve", "", resolvePairingCodeRequest{ShortCode: opts.ShortCode}, &resolved); err != nil {
+			return nil, err
+		}
+		if resolved.ChannelID == "" {
+			return nil, errors.New("broker resolve response missing channel id")
+		}
+		if resolved.CreatorRole != "browser" {
+			return nil, errors.New("short code belongs to a channel a browser did not create")
+		}
+		channelID = resolved.ChannelID
+	}
+	privateKey, err := generatePrivateKey()
+	if err != nil {
+		return nil, err
+	}
+	publicJWK, err := publicKeyToJWK(privateKey.PublicKey())
+	if err != nil {
+		return nil, err
+	}
+	var response joinChannelResponse
+	if err := c.doJSON(ctx, http.MethodPost, brokerBase, "/v1/channels/"+pathEscape(channelID)+"/join", "", joinChannelRequest{
+		PairingToken:       opts.PairingToken,
+		ShortCode:          opts.ShortCode,
+		MinterPublicKeyJWK: publicJWK,
+	}, &response); err != nil {
+		return nil, err
+	}
+	if response.ChannelID != channelID || response.Role != "minter" || response.MinterToken == "" {
+		return nil, errors.New("broker join response is not a minter join of the requested channel")
+	}
+	if response.Algorithm != Algorithm {
+		return nil, fmt.Errorf("unsupported channel algorithm: %s", response.Algorithm)
+	}
+	if response.BrowserPublicKeyJWK == nil {
+		return nil, errors.New("broker join response missing browser public key")
+	}
+	if _, err := jwkToPublicKey(*response.BrowserPublicKeyJWK); err != nil {
+		return nil, fmt.Errorf("broker join response browser public key: %w", err)
+	}
+	if err := validateBrowserOrigin(response.Origin); err != nil {
+		return nil, fmt.Errorf("broker join response: %w", err)
+	}
+	var browserInfo BrowserInfo
+	if len(response.BrowserInfo) > 0 {
+		if err := json.Unmarshal(response.BrowserInfo, &browserInfo); err != nil {
+			return nil, fmt.Errorf("decode broker join browser info: %w", err)
+		}
+	}
+	return &Channel{
+		client:       c,
+		brokerBase:   brokerBase,
+		channelID:    channelID,
+		minterToken:  response.MinterToken,
+		privateKey:   privateKey,
+		publicKeyJWK: publicJWK,
+		joined:       true,
+		requester: JoinedRequester{
+			Origin:      response.Origin,
+			BrowserInfo: browserInfo,
+		},
+		joinedBrowserJWK: *response.BrowserPublicKeyJWK,
+	}, nil
+}
+
+// Requester returns what the broker attested when this minter joined a
+// browser-created channel. It is the zero value for a channel this minter
+// created.
+func (ch *Channel) Requester() JoinedRequester {
+	return ch.requester
+}
+
+// ChannelID returns the broker channel id.
+func (ch *Channel) ChannelID() string {
+	return ch.channelID
+}
+
 // PairingDisplay returns a copy of the frontend-safe display material.
 func (ch *Channel) PairingDisplay() PairingDisplay {
 	return PairingDisplay{
@@ -145,6 +276,14 @@ func (ch *Channel) PollMintRequest(ctx context.Context, afterSeq int64) (*MintRe
 		}
 		if err := validateMintRequestPlaintext(decoded, ch.channelID, message.MessageID, remotePublicJWK); err != nil {
 			return nil, err
+		}
+		if ch.joined {
+			if !publicJWKMatches(remotePublicJWK, ch.joinedBrowserJWK) {
+				return nil, ErrBrowserKeyMismatch
+			}
+			if decoded.Origin != ch.requester.Origin {
+				return nil, ErrOriginMismatch
+			}
 		}
 		requestedExpiresInSeconds, err := parseRequestedExpiresInSeconds(decoded.RequestedExpiresInSeconds)
 		if err != nil {
@@ -342,7 +481,14 @@ func (c *Client) doJSON(ctx context.Context, method string, base *url.URL, reque
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("broker %s %s failed with status %d", method, requestURL.Path, resp.StatusCode)
+		brokerErr := &BrokerError{Method: method, Path: requestURL.Path, StatusCode: resp.StatusCode}
+		var body struct {
+			Error string `json:"error"`
+		}
+		if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&body) == nil {
+			brokerErr.Code = body.Error
+		}
+		return brokerErr
 	}
 	if responseBody == nil || resp.StatusCode == http.StatusNoContent {
 		return nil
