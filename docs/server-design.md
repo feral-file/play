@@ -70,18 +70,20 @@ A browser-created channel returns a `v: 2` payload with `creatorRole: "browser"`
 `docs/api-design.md`); the site turns it into an app link
 `https://link.feralfile.com/pair?channel=<id>&token=<pairingToken>`.
 
-`pairingToken` is a high-entropy bearer join secret. It may appear in the QR code
-or deep link shown on the FF1 display, but the server stores only
-`hash(pairingToken)`. The raw value is returned only when the minter creates the
-channel so the FF1 frontend can render it.
+`pairingToken` is a high-entropy bearer join secret. It may appear in the app
+link or QR code the site shows (site-initiated) or in the QR code or deep link
+shown on the FF1 display (legacy), but the server stores only
+`hash(pairingToken)`. The raw value is returned only to the channel creator so it
+can render it.
 
 `shortCode` is optional, lower entropy, and user-entered. It must be short-lived,
 rate limited, and stored only as a hash. A short-code lookup index may map
 `hash(shortCode)` to `channelId`, but failed attempts and lockout state must also
 be durable, not in memory.
 
-After the browser successfully joins, the broker should mint a browser
-participant token, store only its hash, and mark the pairing token as consumed.
+After the joiner (the minter on a browser-created channel, the browser on a
+legacy minter-created one) successfully joins, the broker mints its participant
+token, stores only its hash, and marks the pairing token as consumed.
 This makes the plaintext QR token a one-time bootstrap credential rather than a
 long-lived channel credential.
 
