@@ -708,6 +708,10 @@ type joinHarness struct {
 	creatorRole string
 	// joinExpiresAt, when set, is the expiresAt the join endpoint reports.
 	joinExpiresAt time.Time
+	// pollExpiresAt and sendExpiresAt, when set, are the expiresAt the poll and
+	// send endpoints report.
+	pollExpiresAt time.Time
+	sendExpiresAt time.Time
 }
 
 func newJoinHarness(t *testing.T) *joinHarness {
@@ -765,7 +769,7 @@ func newJoinHarness(t *testing.T) *joinHarness {
 			if r.Header.Get("Authorization") != "Bearer mt_joined" {
 				t.Fatalf("poll authorization = %q", r.Header.Get("Authorization"))
 			}
-			writeJSON(t, w, pollMessagesResponse{ChannelID: "ch_site", ExpiresAt: time.Now().Add(5 * time.Minute).UTC(), Messages: h.messages})
+			writeJSON(t, w, pollMessagesResponse{ChannelID: "ch_site", ExpiresAt: joinExpiry(h.pollExpiresAt), Messages: h.messages})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/channels/ch_site/messages":
 			if r.Header.Get("Authorization") != "Bearer mt_joined" {
 				t.Fatalf("send authorization = %q", r.Header.Get("Authorization"))
@@ -775,7 +779,7 @@ func newJoinHarness(t *testing.T) *joinHarness {
 				t.Fatal(err)
 			}
 			h.sentMessages = append(h.sentMessages, message)
-			writeJSON(t, w, sendMessageResponse{ChannelID: "ch_site", Seq: 2, ExpiresAt: time.Now().Add(5 * time.Minute).UTC()})
+			writeJSON(t, w, sendMessageResponse{ChannelID: "ch_site", Seq: 2, ExpiresAt: joinExpiry(h.sendExpiresAt)})
 		case r.Method == http.MethodDelete && r.URL.Path == "/v1/channels/ch_site":
 			if r.Header.Get("Authorization") != "Bearer mt_joined" {
 				t.Fatalf("close authorization = %q", r.Header.Get("Authorization"))
@@ -1051,4 +1055,60 @@ func joinExpiry(fixed time.Time) time.Time {
 		return fixed
 	}
 	return time.Now().Add(5 * time.Minute).UTC()
+}
+
+func TestChannelExpiresAtFollowsPollAndSend(t *testing.T) {
+	h := newJoinHarness(t)
+	joinedAt := time.Date(2026, 9, 25, 21, 0, 0, 0, time.UTC)
+	h.joinExpiresAt = joinedAt
+	channel := h.join(t, JoinChannelOptions{ChannelID: "ch_site", PairingToken: "pt_secret"})
+
+	// A poll reporting a later expiry moves it forward.
+	h.pollExpiresAt = joinedAt.Add(2 * time.Minute)
+	h.messages = []encryptedMessage{h.mintRequest(t, channel, h.browserKey, joinTestOrigin)}
+	request, err := channel.PollMintRequest(context.Background(), 0)
+	if err != nil || request == nil {
+		t.Fatalf("poll = %#v, %v", request, err)
+	}
+	if !channel.ExpiresAt().Equal(h.pollExpiresAt) {
+		t.Fatalf("ExpiresAt after poll = %v, want %v", channel.ExpiresAt(), h.pollExpiresAt)
+	}
+
+	// A send reporting a later expiry moves it forward again.
+	h.sendExpiresAt = joinedAt.Add(5 * time.Minute)
+	if _, err := channel.SendMintRejection(context.Background(), *request, MintRejection{Reason: "declined"}); err != nil {
+		t.Fatal(err)
+	}
+	if !channel.ExpiresAt().Equal(h.sendExpiresAt) {
+		t.Fatalf("ExpiresAt after send = %v, want %v", channel.ExpiresAt(), h.sendExpiresAt)
+	}
+
+	// An earlier value never moves it backwards.
+	h.pollExpiresAt = joinedAt
+	if _, err := channel.PollMintRequest(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if !channel.ExpiresAt().Equal(h.sendExpiresAt) {
+		t.Fatalf("ExpiresAt after an earlier poll value = %v, want %v", channel.ExpiresAt(), h.sendExpiresAt)
+	}
+}
+
+func TestChannelExpiresAtConcurrentAccess(t *testing.T) {
+	h := newJoinHarness(t)
+	channel := h.join(t, JoinChannelOptions{ChannelID: "ch_site", PairingToken: "pt_secret"})
+	base := channel.ExpiresAt()
+	done := make(chan struct{})
+	for i := 1; i <= 8; i++ {
+		go func(i int) {
+			defer func() { done <- struct{}{} }()
+			channel.noteExpiresAt(base.Add(time.Duration(i) * time.Second))
+			_ = channel.ExpiresAt()
+		}(i)
+	}
+	for i := 0; i < 8; i++ {
+		<-done
+	}
+	if want := base.Add(8 * time.Second); !channel.ExpiresAt().Equal(want) {
+		t.Fatalf("ExpiresAt = %v, want the latest %v", channel.ExpiresAt(), want)
+	}
 }

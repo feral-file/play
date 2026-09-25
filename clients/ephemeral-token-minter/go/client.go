@@ -14,6 +14,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -65,7 +66,11 @@ type Channel struct {
 	publicKeyJWK PublicJWK
 	display      PairingDisplay
 
-	// expiresAt is the channel expiry the broker reported at create or join.
+	// expiresMu guards expiresAt: feral-controld polls and sends on a channel
+	// from more than one goroutine.
+	expiresMu sync.Mutex
+	// expiresAt is the latest channel expiry the broker reported, at create or
+	// join and then in every successful poll and send response.
 	expiresAt time.Time
 
 	// joined is set for a channel a browser created and this minter joined.
@@ -224,13 +229,28 @@ func (ch *Channel) Requester() JoinedRequester {
 	return ch.requester
 }
 
-// ExpiresAt returns the channel expiry the broker reported when this minter
-// created or joined the channel. The broker's deadline is idle-based: each
-// accepted message moves it later (SendMessageResult.ExpiresAt reports the new
-// value), so this is the deadline for the pairing to make progress, not a hard
-// end of the channel.
+// ExpiresAt returns the latest channel expiry the broker reported: at create
+// or join, then refreshed from every successful PollMintRequest and send
+// response. The broker's deadline is idle-based and each accepted message moves
+// it later, so this tracks the real deadline as far as this minter has seen it.
+// It never moves backwards.
 func (ch *Channel) ExpiresAt() time.Time {
+	ch.expiresMu.Lock()
+	defer ch.expiresMu.Unlock()
 	return ch.expiresAt
+}
+
+// noteExpiresAt records a broker-reported expiry if it is later than the one
+// held; zero and earlier values are ignored.
+func (ch *Channel) noteExpiresAt(expiresAt time.Time) {
+	if expiresAt.IsZero() {
+		return
+	}
+	ch.expiresMu.Lock()
+	defer ch.expiresMu.Unlock()
+	if expiresAt.After(ch.expiresAt) {
+		ch.expiresAt = expiresAt
+	}
 }
 
 // ChannelID returns the broker channel id.
@@ -275,6 +295,7 @@ func (ch *Channel) PollMintRequest(ctx context.Context, afterSeq int64) (*MintRe
 	if response.ChannelID != "" && response.ChannelID != ch.channelID {
 		return nil, errors.New("broker poll response channel mismatch")
 	}
+	ch.noteExpiresAt(response.ExpiresAt)
 	for _, message := range response.Messages {
 		if message.Sender != "browser" || message.Recipient != "minter" {
 			continue
@@ -399,6 +420,7 @@ func (ch *Channel) sendEncryptedResult(ctx context.Context, request MintRequest,
 	if response.ChannelID != "" && response.ChannelID != ch.channelID {
 		return nil, errors.New("broker send response channel mismatch")
 	}
+	ch.noteExpiresAt(response.ExpiresAt)
 	return &SendMessageResult{
 		ChannelID: response.ChannelID,
 		Seq:       response.Seq,
