@@ -5,9 +5,7 @@
  * stay human-readable and may change between versions; codes do not.
  */
 export type PlayErrorCode =
-  | "pairing_code_not_found"
   | "pairing_code_expired"
-  | "pairing_code_used"
   | "mint_rejected"
   | "approval_timeout"
   | "session_rejected"

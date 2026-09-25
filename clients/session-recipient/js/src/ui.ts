@@ -1,65 +1,88 @@
+import qrcode from "qrcode-generator";
 import {
   displayDp1Playlist,
   readStoredEphemeralBrowserSession,
   requestEphemeralSession,
+  validateAppLinkBaseUrl,
   validateRequestedExpiresInSeconds,
   type BrowserInfo,
   type DisplayDp1PlaylistOptions,
   type Dp1Playlist,
   type EphemeralBrowserSession,
-  type PairingInput,
   type RequestEphemeralSessionOptions,
   type TokenStorage,
   type TokenStorageOptions
 } from "./client.js";
 import { PlayError } from "./errors.js";
+import type { PairingMaterial } from "./pairingPayload.js";
 
-export type PairingCodeDialogCopy = {
+export type PairingDialogCopy = {
   title: string;
-  intro: string;
-  instructions: readonly string[];
+  /** Primary action on a phone: opens the Feral File app through the app link. */
+  openAppLabel: string;
+  /** Caption under the QR code on a desktop. */
+  qrCaption: string;
+  /** Accessible name of the QR code image. */
+  qrLabel: string;
+  /** Line above the six-digit code. */
   codeLabel: string;
-  codePlaceholder: string;
-  submitLabel: string;
+  /** Hint under the code; tapping the code copies it. */
+  copyHint: string;
+  /** Shown in place of the hint once the code is on the clipboard. */
+  copiedHint: string;
+  /** Status while the channel waits for an Art Computer to join. */
+  waitingStatus: string;
+  /** Status once the Art Computer has joined and approval is in the app. */
+  approveStatus: string;
+  /** Status once the session is approved, just before the dialog closes. */
+  approvedStatus: string;
   cancelLabel: string;
-  approvalTitle: string;
-  approvalBody: string;
-  cliNotice?: string;
-  errorTitle: string;
 };
 
-export type PairingCodeDialogClassNames = {
+export type PairingDialogClassNames = {
   overlay?: string;
   panel?: string;
   title?: string;
-  intro?: string;
-  instructions?: string;
-  label?: string;
-  input?: string;
+  appLink?: string;
+  qr?: string;
+  caption?: string;
+  codeLabel?: string;
+  code?: string;
+  status?: string;
   actions?: string;
-  primaryButton?: string;
   secondaryButton?: string;
-  message?: string;
 };
 
-export type PairingCodeDialogOptions = {
-  brokerBaseUrl: string;
-  copy?: Partial<PairingCodeDialogCopy>;
-  classNames?: PairingCodeDialogClassNames;
+/**
+ * `auto` (the default) picks the phone layout on a touch device with a
+ * phone-sized viewport and the QR layout everywhere else.
+ */
+export type PairingDialogLayout = "auto" | "mobile" | "desktop";
+
+export type PairingDialogOptions = {
+  copy?: Partial<PairingDialogCopy>;
+  classNames?: PairingDialogClassNames;
   document?: Document;
+  layout?: PairingDialogLayout;
+  /** Called when the visitor cancels; the library stops pairing with `pairing_canceled`. */
+  onCancel: () => void;
 };
 
-export type PairingCodeDialog = {
-  prompt: () => Promise<PairingInput>;
-  showApprovalPending: () => void;
-  showError: (message: string) => void;
+export type PairingDialog = {
+  /** Shows the pairing material; called again with fresh material when an expired channel is replaced. */
+  show: (material: PairingMaterial) => void;
+  setStatus: (text: string) => void;
   close: () => void;
 };
 
-export type RequestEphemeralSessionWithPairingUiOptions = Omit<RequestEphemeralSessionOptions, "pairing"> & {
-  brokerBaseUrl: string;
-  createDialog?: (options: PairingCodeDialogOptions) => PairingCodeDialog;
-  dialog?: Omit<PairingCodeDialogOptions, "brokerBaseUrl">;
+type PairingPassThroughOptions = Omit<
+  RequestEphemeralSessionOptions,
+  "onPairingMaterial" | "onPeerJoined" | "signal" | "channelRegenerations"
+>;
+
+export type RequestEphemeralSessionWithPairingUiOptions = PairingPassThroughOptions & {
+  createDialog?: (options: PairingDialogOptions) => PairingDialog;
+  dialog?: Omit<PairingDialogOptions, "onCancel">;
 };
 
 export type ValueProvider<T> = T | (() => T | Promise<T>);
@@ -69,6 +92,11 @@ export type PlayOnArtComputerButtonOptions = {
   playlist: ValueProvider<Dp1Playlist>;
   brokerBaseUrl: ValueProvider<string>;
   relayerBaseUrl?: ValueProvider<string | undefined>;
+  /**
+   * Base of the link that brings the visitor's Art Computer to the pairing
+   * channel. Defaults to `https://link.feralfile.com/pair`.
+   */
+  appLinkBaseUrl?: string;
   browserInfo?: BrowserInfo;
   storage?: TokenStorageOptions;
   pollIntervalMs?: number;
@@ -86,8 +114,8 @@ export type PlayOnArtComputerButtonOptions = {
   busyLabel?: string;
   className?: string;
   statusClassName?: string;
-  dialog?: Omit<PairingCodeDialogOptions, "brokerBaseUrl">;
-  createDialog?: (options: PairingCodeDialogOptions) => PairingCodeDialog;
+  dialog?: Omit<PairingDialogOptions, "onCancel">;
+  createDialog?: (options: PairingDialogOptions) => PairingDialog;
   onStatusChange?: (message: string) => void;
   onSuccess?: () => void;
   onError?: (error: unknown) => void;
@@ -107,65 +135,45 @@ type OptionalBrowserGlobals = {
 
 const dialogStyleElementId = "ff-art-computer-pairing-ui-style";
 const defaultButtonLabel = "Play on Art Computer";
+const svgNamespace = "http://www.w3.org/2000/svg";
+/** Largest viewport short side, in CSS pixels, treated as a phone. */
+const phoneShortSideMaxPx = 600;
+/** Expired channels the wrapped flow replaces before giving up. */
+const wrappedChannelRegenerations = 2;
+const qrQuietZoneModules = 4;
 
-export const defaultPairingCodeDialogCopy: PairingCodeDialogCopy = {
-  title: "Pair with Art Computer",
-  intro: "Enter the Browser Pairing code from your FF1 to approve this browser for playback.",
-  instructions: [
-    "Make sure the FF1 is open and connected.",
-    "Open the Feral File mobile app.",
-    "Go to Settings -> Art Computers.",
-    "Select the FF1 you want to use.",
-    "In Browser Pairing, toggle pairing mode on, then enter the code shown for that FF1."
-  ],
-  codeLabel: "Pairing code",
-  codePlaceholder: "123456",
-  submitLabel: "Continue",
-  cancelLabel: "Cancel",
-  approvalTitle: "Approve in Feral File",
-  approvalBody: "Open the Feral File mobile app to approve this browser session.",
-  errorTitle: "Pairing failed"
+export const defaultPairingDialogCopy: PairingDialogCopy = {
+  title: "Play on your Art Computer",
+  openAppLabel: "Open the Feral File app",
+  qrCaption: "Scan with your phone camera or the Feral File app",
+  qrLabel: "QR code that opens the Feral File app",
+  codeLabel: "Or enter this code in the app",
+  copyHint: "Tap to copy",
+  copiedHint: "Copied",
+  waitingStatus: "Waiting for your Art Computer…",
+  approveStatus: "Approve in the Feral File app…",
+  approvedStatus: "Approved. Starting playback…",
+  cancelLabel: "Cancel"
 };
 
 export function pairingErrorMessage(error: unknown): string {
   if (error instanceof PlayError && error.code !== undefined) {
     switch (error.code) {
-      // The broker drops a code from its index the moment its channel expires
-      // or closes, so an expired code answers 404, not 410. To the person
-      // typing it, "not found" is the same event as "expired": say that.
-      case "pairing_code_not_found":
-        return "This pairing code is no longer valid. Codes expire after a few minutes, so turn Browser Pairing on again and enter the new code.";
       case "pairing_code_expired":
-        return "Pairing code expired. Turn Browser Pairing on again and enter the new code.";
-      case "pairing_code_used":
-        return "Pairing code was already used. Turn Browser Pairing on again and enter the new code.";
+        return "The pairing code expired. Press play to get a new one.";
+      case "pairing_canceled":
+        return "Pairing canceled.";
       case "mint_rejected":
         return "The browser session was not approved in Feral File.";
       case "approval_timeout":
-        return "Timed out waiting for approval in Feral File.";
+        return "Timed out waiting for your Art Computer. Press play to try again.";
       case "session_rejected":
         return "The stored browser session was rejected. Pair again.";
       default:
         break;
     }
   }
-  const raw = error instanceof Error ? error.message : "request failed";
-  if (raw === "short-code resolution failed: 404") {
-    return "This pairing code is no longer valid. Codes expire after a few minutes, so turn Browser Pairing on again and enter the new code.";
-  }
-  if (raw === "short-code resolution failed: 410") {
-    return "Pairing code expired. Turn Browser Pairing on again and enter the new code.";
-  }
-  if (raw === "channel join failed: 401") {
-    return "Pairing code was already used. Turn Browser Pairing on again and enter the new code.";
-  }
-  if (raw === "mint request rejected") {
-    return "The browser session was not approved in Feral File.";
-  }
-  if (raw === "poll timed out") {
-    return "Timed out waiting for approval in Feral File.";
-  }
-  return raw;
+  return error instanceof Error ? error.message : "request failed";
 }
 
 export function clearStoredEphemeralBrowserSession(storage: TokenStorage, origin: string): void {
@@ -176,10 +184,59 @@ export function hasStoredEphemeralBrowserSession(storage: TokenStorage, origin: 
   return readStoredEphemeralBrowserSession(storage, origin) !== undefined;
 }
 
-export function createPairingCodeDialog(options: PairingCodeDialogOptions): PairingCodeDialog {
+/**
+ * True on a touch device (coarse pointer or touch points) whose viewport is
+ * phone-sized. That visitor has the Feral File app on the device in hand, so
+ * the dialog offers the app link as a button rather than a QR to scan.
+ */
+export function isPhoneLikeViewport(view: Window | null | undefined): boolean {
+  if (view === null || view === undefined) {
+    return false;
+  }
+  const coarsePointer = typeof view.matchMedia === "function" && view.matchMedia("(pointer: coarse)").matches;
+  const touchPoints = typeof view.navigator === "object" && view.navigator.maxTouchPoints > 0;
+  const shortSide = Math.min(view.innerWidth, view.innerHeight);
+  return (coarsePointer || touchPoints) && shortSide > 0 && shortSide <= phoneShortSideMaxPx;
+}
+
+/** Renders `text` as an inline SVG QR code, locally, with no network fetch. */
+export function renderQrSvg(ownerDocument: Document, text: string, label: string): SVGSVGElement {
+  const code = qrcode(0, "M");
+  code.addData(text, "Byte");
+  code.make();
+  const modules = code.getModuleCount();
+  const size = modules + qrQuietZoneModules * 2;
+  let path = "";
+  for (let row = 0; row < modules; row += 1) {
+    for (let col = 0; col < modules; col += 1) {
+      if (code.isDark(row, col)) {
+        path += `M${String(col + qrQuietZoneModules)} ${String(row + qrQuietZoneModules)}h1v1h-1z`;
+      }
+    }
+  }
+  const svg = ownerDocument.createElementNS(svgNamespace, "svg");
+  svg.setAttribute("viewBox", `0 0 ${String(size)} ${String(size)}`);
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", label);
+  svg.setAttribute("shape-rendering", "crispEdges");
+  const background = ownerDocument.createElementNS(svgNamespace, "rect");
+  background.setAttribute("width", String(size));
+  background.setAttribute("height", String(size));
+  background.setAttribute("fill", "#ffffff");
+  const dark = ownerDocument.createElementNS(svgNamespace, "path");
+  dark.setAttribute("d", path);
+  dark.setAttribute("fill", "#000000");
+  svg.append(background, dark);
+  return svg;
+}
+
+export function createPairingDialog(options: PairingDialogOptions): PairingDialog {
   const ownerDocument = options.document ?? requiredDocument();
   ensureDefaultStyles(ownerDocument);
-  const copy = { ...defaultPairingCodeDialogCopy, ...options.copy };
+  const copy = { ...defaultPairingDialogCopy, ...options.copy };
+  const layout = options.layout ?? "auto";
+  const mobile = layout === "mobile" || (layout === "auto" && isPhoneLikeViewport(ownerDocument.defaultView));
+
   const overlay = ownerDocument.createElement("div");
   overlay.className = className("ff-ac-pairing-overlay", options.classNames?.overlay);
   overlay.setAttribute("role", "presentation");
@@ -189,6 +246,7 @@ export function createPairingCodeDialog(options: PairingCodeDialogOptions): Pair
   panel.setAttribute("role", "dialog");
   panel.setAttribute("aria-modal", "true");
   panel.setAttribute("aria-labelledby", "ff-ac-pairing-title");
+  panel.setAttribute("data-layout", mobile ? "mobile" : "desktop");
   overlay.append(panel);
 
   const title = ownerDocument.createElement("h2");
@@ -196,135 +254,104 @@ export function createPairingCodeDialog(options: PairingCodeDialogOptions): Pair
   title.className = className("ff-ac-pairing-title", options.classNames?.title);
   title.textContent = copy.title;
 
-  const intro = ownerDocument.createElement("p");
-  intro.className = className("ff-ac-pairing-intro", options.classNames?.intro);
-  intro.textContent = copy.intro;
+  // Filled by show(): the app-link button (phone) or the QR (desktop).
+  const primary = ownerDocument.createElement("div");
+  primary.className = "ff-ac-pairing-primary-area";
 
-  const instructionList = ownerDocument.createElement("ol");
-  instructionList.className = className("ff-ac-pairing-steps", options.classNames?.instructions);
-  for (const instruction of copy.instructions) {
-    const item = ownerDocument.createElement("li");
-    item.textContent = instruction;
-    instructionList.append(item);
-  }
+  const codeLabel = ownerDocument.createElement("p");
+  codeLabel.className = className("ff-ac-pairing-code-label", options.classNames?.codeLabel);
+  codeLabel.textContent = copy.codeLabel;
 
-  const form = ownerDocument.createElement("form");
-  form.className = "ff-ac-pairing-form";
+  const code = ownerDocument.createElement("button");
+  code.type = "button";
+  code.className = className("ff-ac-pairing-code", options.classNames?.code);
 
-  const label = ownerDocument.createElement("label");
-  label.className = className("ff-ac-pairing-label", options.classNames?.label);
-  label.textContent = copy.codeLabel;
+  const copyHint = ownerDocument.createElement("p");
+  copyHint.className = "ff-ac-pairing-copy-hint";
+  copyHint.setAttribute("aria-live", "polite");
+  copyHint.textContent = copy.copyHint;
 
-  const input = ownerDocument.createElement("input");
-  input.className = className("ff-ac-pairing-input", options.classNames?.input);
-  input.type = "text";
-  input.inputMode = "numeric";
-  input.autocomplete = "one-time-code";
-  input.placeholder = copy.codePlaceholder;
-  label.append(input);
-
-  const message = ownerDocument.createElement("p");
-  message.className = className("ff-ac-pairing-message", options.classNames?.message);
-  message.setAttribute("aria-live", "polite");
+  const status = ownerDocument.createElement("p");
+  status.className = className("ff-ac-pairing-status", options.classNames?.status);
+  status.setAttribute("aria-live", "polite");
 
   const actions = ownerDocument.createElement("div");
   actions.className = className("ff-ac-pairing-actions", options.classNames?.actions);
-
-  const submit = ownerDocument.createElement("button");
-  submit.className = className("ff-ac-pairing-primary", options.classNames?.primaryButton);
-  submit.type = "submit";
-  submit.textContent = copy.submitLabel;
 
   const cancel = ownerDocument.createElement("button");
   cancel.className = className("ff-ac-pairing-secondary", options.classNames?.secondaryButton);
   cancel.type = "button";
   cancel.textContent = copy.cancelLabel;
-  actions.append(cancel, submit);
-  form.append(label, message, actions);
+  actions.append(cancel);
 
-  const approval = ownerDocument.createElement("div");
-  approval.className = "ff-ac-pairing-approval";
-  approval.hidden = true;
+  panel.append(title, primary, codeLabel, code, copyHint, status, actions);
 
-  const approvalTitle = ownerDocument.createElement("h3");
-  approvalTitle.className = "ff-ac-pairing-approval-title";
-  approvalTitle.textContent = copy.approvalTitle;
+  let currentCode = "";
 
-  const approvalBody = ownerDocument.createElement("p");
-  approvalBody.className = "ff-ac-pairing-approval-body";
-  approvalBody.textContent = copy.approvalBody;
-
-  approval.append(approvalTitle, approvalBody);
-  if (copy.cliNotice !== undefined && copy.cliNotice.length > 0) {
-    const cliNotice = ownerDocument.createElement("p");
-    cliNotice.className = "ff-ac-pairing-cli";
-    cliNotice.textContent = copy.cliNotice;
-    approval.append(cliNotice);
-  }
-  panel.append(title, intro, instructionList, form, approval);
-
-  let settled = false;
-  let promptPromise: Promise<PairingInput> | undefined;
-  let resolvePrompt: ((pairing: PairingInput) => void) | undefined;
-  let rejectPrompt: ((error: Error) => void) | undefined;
-
-  function appendDialog(): void {
-    if (!ownerDocument.body.contains(overlay)) {
-      ownerDocument.body.append(overlay);
+  function renderPrimary(material: PairingMaterial): void {
+    for (const child of Array.from(primary.children)) {
+      child.remove();
     }
-    input.focus();
+    if (mobile) {
+      const appLink = ownerDocument.createElement("a");
+      appLink.className = className("ff-ac-pairing-app-link", options.classNames?.appLink);
+      appLink.href = material.appLink;
+      appLink.target = "_self";
+      appLink.textContent = copy.openAppLabel;
+      primary.append(appLink);
+      return;
+    }
+    const qr = ownerDocument.createElement("div");
+    qr.className = className("ff-ac-pairing-qr", options.classNames?.qr);
+    qr.append(renderQrSvg(ownerDocument, material.appLink, copy.qrLabel));
+    const caption = ownerDocument.createElement("p");
+    caption.className = className("ff-ac-pairing-caption", options.classNames?.caption);
+    caption.textContent = copy.qrCaption;
+    primary.append(qr, caption);
+  }
+
+  function setStatus(text: string): void {
+    status.textContent = text;
   }
 
   function close(): void {
     overlay.remove();
   }
 
-  function showApprovalPending(): void {
-    form.hidden = true;
-    approval.hidden = false;
-    message.textContent = "";
-  }
-
-  function showError(value: string): void {
-    form.hidden = false;
-    approval.hidden = true;
-    message.textContent = `${copy.errorTitle}: ${value}`;
-  }
-
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const shortCode = input.value.trim();
-    if (shortCode.length === 0) {
-      showError("Pairing code is required.");
+  code.addEventListener("click", () => {
+    const clipboard = ownerDocument.defaultView?.navigator.clipboard;
+    if (currentCode.length === 0 || clipboard === undefined) {
       return;
     }
-    if (settled) {
-      return;
-    }
-    settled = true;
-    showApprovalPending();
-    resolvePrompt?.({ brokerBaseUrl: options.brokerBaseUrl, shortCode });
+    const copied = currentCode;
+    clipboard.writeText(copied).then(() => {
+      if (currentCode === copied) {
+        copyHint.textContent = copy.copiedHint;
+      }
+    }, () => {
+      // Clipboard refused (permissions, insecure context): the code stays on
+      // screen to read and type.
+    });
   });
 
   cancel.addEventListener("click", () => {
-    if (!settled) {
-      settled = true;
-      rejectPrompt?.(new PlayError("pairing canceled", "pairing_canceled"));
-    }
     close();
+    options.onCancel();
   });
 
   return {
-    prompt: () => {
-      appendDialog();
-      promptPromise ??= new Promise<PairingInput>((resolve, reject) => {
-        resolvePrompt = resolve;
-        rejectPrompt = reject;
-      });
-      return promptPromise;
+    show: (material) => {
+      currentCode = material.shortCode;
+      renderPrimary(material);
+      code.textContent = material.shortCode;
+      code.setAttribute("aria-label", `${copy.codeLabel}: ${material.shortCode.split("").join(" ")}. ${copy.copyHint}`);
+      copyHint.textContent = copy.copyHint;
+      setStatus(copy.waitingStatus);
+      if (!ownerDocument.body.contains(overlay)) {
+        ownerDocument.body.append(overlay);
+      }
     },
-    showApprovalPending,
-    showError,
+    setStatus,
     close
   };
 }
@@ -333,6 +360,7 @@ export async function requestEphemeralSessionWithPairingUi(
   options: RequestEphemeralSessionWithPairingUiOptions
 ): Promise<EphemeralBrowserSession> {
   validateRequestedExpiresInSeconds(options.requestedExpiresInSeconds);
+  validateAppLinkBaseUrl(options.appLinkBaseUrl);
   const storage = resolveUiStorage(options.storage);
   const origin = currentOriginForUi();
   const existingSession = storage === undefined ? undefined : readStoredEphemeralBrowserSession(storage, origin);
@@ -340,23 +368,30 @@ export async function requestEphemeralSessionWithPairingUi(
     return existingSession;
   }
 
-  const createDialog = options.createDialog ?? createPairingCodeDialog;
+  const copy = { ...defaultPairingDialogCopy, ...options.dialog?.copy };
+  const cancelController = new AbortController();
+  const { createDialog: createDialogOption, dialog: dialogOptions, ...requestOptions } = options;
+  const createDialog = createDialogOption ?? createPairingDialog;
   const dialog = createDialog({
-    brokerBaseUrl: options.brokerBaseUrl,
-    ...options.dialog
+    ...dialogOptions,
+    onCancel: () => {
+      cancelController.abort();
+    }
   });
   try {
-    const pairing = await dialog.prompt();
-    dialog.showApprovalPending();
     const session = await requestEphemeralSession({
-      pairing,
-      ...(options.browserInfo === undefined ? {} : { browserInfo: options.browserInfo }),
-      ...(options.storage === undefined ? {} : { storage: options.storage }),
-      ...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
-      ...(options.maxWaitMs === undefined ? {} : { maxWaitMs: options.maxWaitMs }),
-      ...(options.requestedExpiresInSeconds === undefined ? {} : { requestedExpiresInSeconds: options.requestedExpiresInSeconds }),
-      ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl })
+      ...requestOptions,
+      channelRegenerations: wrappedChannelRegenerations,
+      signal: cancelController.signal,
+      onPairingMaterial: (material) => {
+        dialog.show(material);
+        dialog.setStatus(copy.waitingStatus);
+      },
+      onPeerJoined: () => {
+        dialog.setStatus(copy.approveStatus);
+      }
     });
+    dialog.setStatus(copy.approvedStatus);
     dialog.close();
     return session;
   } catch (error) {
@@ -367,6 +402,7 @@ export async function requestEphemeralSessionWithPairingUi(
 
 export function mountPlayOnArtComputerButton(options: PlayOnArtComputerButtonOptions): PlayOnArtComputerButtonHandle {
   validateRequestedExpiresInSeconds(options.requestedExpiresInSeconds);
+  validateAppLinkBaseUrl(options.appLinkBaseUrl);
   const ownerDocument = options.document ?? requiredDocument();
   ensureDefaultStyles(ownerDocument);
   const container = resolveContainer(ownerDocument, options.container);
@@ -414,10 +450,11 @@ async function playFromButton(
     const storage = resolveUiStorage(options.storage);
     const origin = currentOriginForUi();
     if (storage !== undefined && !hasStoredEphemeralBrowserSession(storage, origin)) {
-      setStatus(options, status, "Enter the Browser Pairing code shown for your FF1.");
+      setStatus(options, status, "Waiting for your Art Computer.");
     }
     const session = await requestEphemeralSessionWithPairingUi({
       brokerBaseUrl,
+      ...(options.appLinkBaseUrl === undefined ? {} : { appLinkBaseUrl: options.appLinkBaseUrl }),
       browserInfo: options.browserInfo ?? defaultButtonBrowserInfo(ownerDocument),
       ...(options.storage === undefined ? {} : { storage: options.storage }),
       ...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
@@ -545,13 +582,16 @@ function ensureDefaultStyles(ownerDocument: Document): void {
   z-index: 2147483647;
   display: grid;
   place-items: center;
-  padding: 24px;
+  padding: 16px;
   background: rgba(18, 18, 18, 0.72);
 }
 .ff-ac-pairing-panel {
   box-sizing: border-box;
-  width: min(520px, 100%);
-  max-height: min(760px, calc(100vh - 48px));
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  width: min(420px, 100%);
+  max-height: calc(100vh - 32px);
   overflow: auto;
   border: 1px solid #d7d2c8;
   border-radius: 8px;
@@ -560,63 +600,80 @@ function ensureDefaultStyles(ownerDocument: Document): void {
   padding: 24px;
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  text-align: center;
 }
 .ff-ac-pairing-title {
   margin: 0;
   font-size: 22px;
   line-height: 1.25;
 }
-.ff-ac-pairing-intro,
-.ff-ac-pairing-approval-body,
-.ff-ac-pairing-cli,
+.ff-ac-pairing-primary-area {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  width: 100%;
+}
+.ff-ac-pairing-app-link {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  min-height: 48px;
+  border-radius: 6px;
+  padding: 14px 16px;
+  background: #df3f2d;
+  color: #ffffff;
+  font-weight: 800;
+  line-height: 20px;
+  text-decoration: none;
+}
+.ff-ac-pairing-qr {
+  width: min(240px, 100%);
+  aspect-ratio: 1;
+}
+.ff-ac-pairing-qr svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.ff-ac-pairing-caption,
+.ff-ac-pairing-code-label,
+.ff-ac-pairing-copy-hint,
+.ff-ac-pairing-status,
 .ff-ac-play-status {
   line-height: 1.5;
 }
-.ff-ac-pairing-intro {
-  margin: 10px 0 0;
+.ff-ac-pairing-caption,
+.ff-ac-pairing-code-label {
+  margin: 0;
   color: #56534d;
 }
-.ff-ac-pairing-steps {
-  margin: 18px 0;
-  padding-left: 24px;
-  color: #2b2a27;
-}
-.ff-ac-pairing-steps li {
-  margin-top: 8px;
-}
-.ff-ac-pairing-label {
-  display: grid;
-  gap: 8px;
-  font-weight: 700;
-}
-.ff-ac-pairing-input {
-  box-sizing: border-box;
-  width: 100%;
-  height: 48px;
-  border: 1px solid #bdb7ac;
+.ff-ac-pairing-code {
+  border: 1px dashed #bdb7ac;
   border-radius: 6px;
-  padding: 0 14px;
+  padding: 6px 16px;
   background: #ffffff;
   color: #171614;
-  font: 700 20px/1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  cursor: copy;
+  font: 700 36px/1.2 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.12em;
 }
-.ff-ac-pairing-input:focus {
-  border-color: #df3f2d;
-  outline: 3px solid rgba(223, 63, 45, 0.2);
+.ff-ac-pairing-copy-hint {
+  min-height: 21px;
+  margin: 0;
+  color: #6c675f;
+  font-size: 14px;
 }
-.ff-ac-pairing-message {
-  min-height: 22px;
-  margin: 10px 0 0;
-  color: #b42318;
+.ff-ac-pairing-status {
+  min-height: 24px;
+  margin: 4px 0 0;
   font-weight: 700;
 }
 .ff-ac-pairing-actions {
   display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-  margin-top: 18px;
+  justify-content: center;
+  width: 100%;
 }
-.ff-ac-pairing-primary,
 .ff-ac-pairing-secondary,
 .ff-ac-play-button {
   min-height: 42px;
@@ -625,7 +682,6 @@ function ensureDefaultStyles(ownerDocument: Document): void {
   font-weight: 800;
   cursor: pointer;
 }
-.ff-ac-pairing-primary,
 .ff-ac-play-button {
   border: 1px solid #df3f2d;
   background: #df3f2d;
@@ -640,18 +696,6 @@ function ensureDefaultStyles(ownerDocument: Document): void {
   cursor: wait;
   border-color: #8f8b83;
   background: #8f8b83;
-}
-.ff-ac-pairing-approval-title {
-  margin: 0;
-  font-size: 18px;
-}
-.ff-ac-pairing-approval-body {
-  margin: 10px 0 0;
-}
-.ff-ac-pairing-cli {
-  margin: 12px 0 0;
-  color: #6c675f;
-  font-size: 14px;
 }
 .ff-ac-play {
   display: inline-grid;
