@@ -482,6 +482,23 @@ describe("requestEphemeralSession", () => {
     expect((error as PlayError).code).toBe("pairing_code_expired");
   });
 
+  it("times out with approval_timeout when a result poll stalls past maxWaitMs", async () => {
+    const broker = await fakeBroker();
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      if (broker.mintRequests.length > 0 && (init?.method ?? "GET") === "GET") {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("aborted", "AbortError"));
+          });
+        });
+      }
+      return broker.fetchImpl(input, init);
+    });
+    const error = await captureError(requestEphemeralSession(baseOptions(fetchImpl, { maxWaitMs: 30 })));
+    expect((error as PlayError).code).toBe("approval_timeout");
+    expect(broker.channels).toHaveLength(1);
+  });
+
   it("honours a cancel that lands while the result is being read, without storing", async () => {
     const broker = await fakeBroker();
     const storage = memoryStorage();

@@ -746,9 +746,20 @@ async function completeMint(input: {
   while (Date.now() <= deadline) {
     throwIfAborted(context.signal);
     let poll: PollMessagesResponse;
+    // Bound each poll by maxWaitMs too, so a stalled request still times out.
+    const pollController = new AbortController();
+    const onCancel = (): void => {
+      pollController.abort();
+    };
+    context.signal?.addEventListener("abort", onCancel, { once: true });
+    const deadlineTimer = setTimeout(onCancel, Math.max(0, deadline - Date.now()));
     try {
-      poll = await pollMessages({ fetcher: context.fetcher, channel, afterSeq, signal: context.signal });
+      poll = await pollMessages({ fetcher: context.fetcher, channel, afterSeq, signal: pollController.signal });
     } catch (error) {
+      throwIfAborted(context.signal);
+      if (pollController.signal.aborted) {
+        throw new PlayError("poll timed out", "approval_timeout");
+      }
       if (error instanceof TypeError) {
         await sleep(context.pollIntervalMs ?? defaultResultPollIntervalMs, context.signal);
         continue;
@@ -757,6 +768,9 @@ async function completeMint(input: {
         throw new PlayError("poll timed out", "approval_timeout");
       }
       throw error;
+    } finally {
+      clearTimeout(deadlineTimer);
+      context.signal?.removeEventListener("abort", onCancel);
     }
     for (const message of poll.messages) {
       afterSeq = Math.max(afterSeq, message.seq);
