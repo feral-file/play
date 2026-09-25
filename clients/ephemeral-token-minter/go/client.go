@@ -241,6 +241,15 @@ func (ch *Channel) MinterPublicKeyJWK() PublicJWK {
 
 // PollMintRequest fetches broker messages after afterSeq and returns the first
 // decryptable browser mint request addressed to this minter.
+//
+// On a joined channel a request that does not match what the broker attested is
+// refused: the error is ErrOriginMismatch or ErrBrowserKeyMismatch, and the
+// decrypted request (channel id, message id, seq, origin, browser info, sender
+// key; RequestedExpiresInSeconds unset) is returned alongside it so the host can
+// answer with SendMintRejection and tell the owner which request was refused.
+// The request is non-nil with an error only for those two errors, and it must
+// never be treated as approved or answered with SendMintSuccess. Every other
+// error returns a nil request.
 func (ch *Channel) PollMintRequest(ctx context.Context, afterSeq int64) (*MintRequest, error) {
 	pollPath := "/v1/channels/" + pathEscape(ch.channelID) + "/messages"
 	query := url.Values{}
@@ -277,28 +286,29 @@ func (ch *Channel) PollMintRequest(ctx context.Context, afterSeq int64) (*MintRe
 		if err := validateMintRequestPlaintext(decoded, ch.channelID, message.MessageID, remotePublicJWK); err != nil {
 			return nil, err
 		}
-		if ch.joined {
-			if !publicJWKMatches(remotePublicJWK, ch.joinedBrowserJWK) {
-				return nil, ErrBrowserKeyMismatch
-			}
-			if decoded.Origin != ch.requester.Origin {
-				return nil, ErrOriginMismatch
-			}
-		}
-		requestedExpiresInSeconds, err := parseRequestedExpiresInSeconds(decoded.RequestedExpiresInSeconds)
-		if err != nil {
-			return nil, err
-		}
-		return &MintRequest{
+		request := &MintRequest{
 			ChannelID:                  ch.channelID,
 			MessageID:                  message.MessageID,
 			Seq:                        message.Seq,
 			Origin:                     decoded.Origin,
 			BrowserInfo:                decoded.BrowserInfo,
 			BrowserPublicKeyJWK:        remotePublicJWK,
-			RequestedExpiresInSeconds:  requestedExpiresInSeconds,
 			SupportsPersistentSessions: decoded.SupportsPersistentSessions,
-		}, nil
+		}
+		if ch.joined {
+			if !publicJWKMatches(remotePublicJWK, ch.joinedBrowserJWK) {
+				return request, ErrBrowserKeyMismatch
+			}
+			if decoded.Origin != ch.requester.Origin {
+				return request, ErrOriginMismatch
+			}
+		}
+		requestedExpiresInSeconds, err := parseRequestedExpiresInSeconds(decoded.RequestedExpiresInSeconds)
+		if err != nil {
+			return nil, err
+		}
+		request.RequestedExpiresInSeconds = requestedExpiresInSeconds
+		return request, nil
 	}
 	return nil, nil
 }

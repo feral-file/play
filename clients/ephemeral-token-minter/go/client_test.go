@@ -918,8 +918,19 @@ func TestPollMintRequestRejectsOriginMismatchOnJoinedChannel(t *testing.T) {
 	channel := h.join(t, JoinChannelOptions{ChannelID: "ch_site", PairingToken: "pt_secret"})
 	h.messages = []encryptedMessage{h.mintRequest(t, channel, h.browserKey, "https://evil.example")}
 	request, err := channel.PollMintRequest(context.Background(), 0)
-	if !errors.Is(err, ErrOriginMismatch) || request != nil {
-		t.Fatalf("PollMintRequest = %#v, %v; want ErrOriginMismatch", request, err)
+	if !errors.Is(err, ErrOriginMismatch) {
+		t.Fatalf("PollMintRequest error = %v; want ErrOriginMismatch", err)
+	}
+	if request == nil || request.ChannelID != "ch_site" || request.MessageID != "msg_browser" || request.Seq != 1 || request.Origin != "https://evil.example" || request.BrowserInfo.Name != "Art Blocks" || !publicJWKMatches(request.BrowserPublicKeyJWK, h.browserJWK) {
+		t.Fatalf("refused request = %#v, want the decrypted request", request)
+	}
+	// The host answers the refused request with an encrypted rejection.
+	if _, err := channel.SendMintRejection(context.Background(), *request, MintRejection{Reason: "origin_mismatch"}); err != nil {
+		t.Fatal(err)
+	}
+	plaintext, _, err := decryptMessage(h.browserKey, h.sentMessages[0], channel.MinterPublicKeyJWK())
+	if err != nil || !strings.Contains(string(plaintext), `"mint_rejected"`) || !strings.Contains(string(plaintext), `"requestMessageId":"msg_browser"`) {
+		t.Fatalf("rejection plaintext = %s, %v", plaintext, err)
 	}
 }
 
@@ -934,8 +945,27 @@ func TestPollMintRequestRejectsBrowserKeyMismatchOnJoinedChannel(t *testing.T) {
 	// against the key the broker returned at join catches it.
 	h.messages = []encryptedMessage{h.mintRequest(t, channel, otherKey, joinTestOrigin)}
 	request, err := channel.PollMintRequest(context.Background(), 0)
-	if !errors.Is(err, ErrBrowserKeyMismatch) || request != nil {
-		t.Fatalf("PollMintRequest = %#v, %v; want ErrBrowserKeyMismatch", request, err)
+	if !errors.Is(err, ErrBrowserKeyMismatch) {
+		t.Fatalf("PollMintRequest error = %v; want ErrBrowserKeyMismatch", err)
+	}
+	otherJWK, err := publicKeyToJWK(otherKey.PublicKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request == nil || request.ChannelID != "ch_site" || request.MessageID != "msg_browser" || request.Seq != 1 || request.Origin != joinTestOrigin || !publicJWKMatches(request.BrowserPublicKeyJWK, otherJWK) {
+		t.Fatalf("refused request = %#v, want the decrypted request", request)
+	}
+}
+
+func TestPollMintRequestOtherErrorsReturnNoRequest(t *testing.T) {
+	h := newJoinHarness(t)
+	channel := h.join(t, JoinChannelOptions{ChannelID: "ch_site", PairingToken: "pt_secret"})
+	message := h.mintRequest(t, channel, h.browserKey, joinTestOrigin)
+	message.Ciphertext = message.Ciphertext[:len(message.Ciphertext)-4] + "AAAA"
+	h.messages = []encryptedMessage{message}
+	request, err := channel.PollMintRequest(context.Background(), 0)
+	if err == nil || errors.Is(err, ErrOriginMismatch) || errors.Is(err, ErrBrowserKeyMismatch) || request != nil {
+		t.Fatalf("tampered request = %#v, %v; want a nil request with a non-sentinel error", request, err)
 	}
 }
 
