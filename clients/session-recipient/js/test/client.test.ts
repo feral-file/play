@@ -427,6 +427,77 @@ describe("requestEphemeralSession", () => {
     expect(readStoredEphemeralBrowserSession(storage, testOrigin)).toEqual(session);
   });
 
+  it("does not leak a token from a malformed broker response", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(() => Promise.resolve(new Response('{"browserToken":"bt_secret_1",', { status: 201 })));
+    const error = await captureError(requestEphemeralSession(baseOptions(fetchImpl)));
+    expect((error as Error).message).toBe("channel create failed: invalid response");
+    expectNoSecrets(error);
+  });
+
+  it("does not wait on a slow channel close before reporting a cancel", async () => {
+    const broker = await fakeBroker({ waitingPolls: Number.MAX_SAFE_INTEGER });
+    const controller = new AbortController();
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      if (init?.method === "DELETE") {
+        return new Promise<Response>(() => undefined);
+      }
+      return broker.fetchImpl(input, init);
+    });
+    const error = await captureError(requestEphemeralSession(baseOptions(fetchImpl, {
+      pollIntervalMs: 5,
+      signal: controller.signal,
+      onPairingMaterial: () => {
+        setTimeout(() => {
+          controller.abort();
+        }, 20);
+      }
+    })));
+    expect((error as PlayError).code).toBe("pairing_canceled");
+    expect(fetchImpl.mock.calls.some(([, init]) => init?.method === "DELETE")).toBe(true);
+  });
+
+  it("expires a channel whose poll stalls past the local deadline", async () => {
+    const broker = await fakeBroker();
+    const realNow = Date.now.bind(Date);
+    let skewMs = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + skewMs);
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      if ((init?.method ?? "GET") === "GET") {
+        // The poll hangs until aborted.
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("aborted", "AbortError"));
+          });
+        });
+      }
+      return broker.fetchImpl(input, init);
+    });
+    const error = await captureError(requestEphemeralSession(baseOptions(fetchImpl, {
+      idleTtlSeconds: 15,
+      onPairingMaterial: () => {
+        // 10 ms of the channel's life left when the first poll starts.
+        skewMs = 15_000 - 10;
+      }
+    })));
+    expect((error as PlayError).code).toBe("pairing_code_expired");
+  });
+
+  it("honours a cancel that lands while the result is being read, without storing", async () => {
+    const broker = await fakeBroker();
+    const storage = memoryStorage();
+    const controller = new AbortController();
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const response = await broker.fetchImpl(input, init);
+      if (broker.mintRequests.length > 0 && (init?.method ?? "GET") === "GET") {
+        controller.abort();
+      }
+      return response;
+    });
+    const error = await captureError(requestEphemeralSession(baseOptions(fetchImpl, { storage: { storage }, signal: controller.signal })));
+    expect((error as PlayError).code).toBe("pairing_canceled");
+    expect(storage.entries.size).toBe(0);
+  });
+
   it("returns a stored session without creating a channel", async () => {
     const broker = await fakeBroker();
     const storage = memoryStorage();

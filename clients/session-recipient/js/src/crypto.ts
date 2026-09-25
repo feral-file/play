@@ -164,7 +164,12 @@ export async function decryptChannelMessage(input: {
     throw new Error("encrypted message algorithm mismatch");
   }
   const aadRaw = base64UrlDecode(input.aad);
-  const decodedAad = JSON.parse(textDecoder.decode(aadRaw)) as Partial<MessageAad>;
+  let decodedAad: Partial<MessageAad>;
+  try {
+    decodedAad = JSON.parse(textDecoder.decode(aadRaw)) as Partial<MessageAad>;
+  } catch {
+    throw new Error("encrypted message channel binding mismatch");
+  }
   if (
     decodedAad.v !== 1 ||
     decodedAad.channelId !== input.channelId ||
@@ -186,7 +191,12 @@ export async function decryptChannelMessage(input: {
     key,
     asArrayBuffer(base64UrlDecode(input.ciphertext))
   );
-  return JSON.parse(textDecoder.decode(plaintext)) as unknown;
+  try {
+    return JSON.parse(textDecoder.decode(plaintext)) as unknown;
+  } catch {
+    // A SyntaxError quotes the input, and the plaintext may hold a session token.
+    throw new Error("encrypted message plaintext invalid");
+  }
 }
 
 export function randomMessageId(): string {

@@ -57,6 +57,7 @@ class FakeElement {
   public target = "";
   public disabled = false;
   public hidden = false;
+  public focused = false;
   public readonly children: FakeElement[] = [];
   public readonly attributes = new Map<string, string>();
   public readonly tagName: string;
@@ -110,6 +111,14 @@ class FakeElement {
       const remaining = (this.listeners.get(type) ?? []).filter((candidate) => candidate !== callback);
       this.listeners.set(type, remaining);
     }, { once: true });
+  }
+
+  public focus(): void {
+    this.focused = true;
+  }
+
+  public querySelector(selector: string): FakeElement | null {
+    return this.findTag(selector) ?? null;
   }
 
   public click(): void {
@@ -304,6 +313,7 @@ describe("createPairingDialog", () => {
     expect(required(panel.find("ff-ac-pairing-code"), "code").textContent).toBe("482913");
     expect(panel.findTag("svg")).toBeUndefined();
     expect(required(panel.find("ff-ac-pairing-status"), "status").textContent).toBe("Waiting for your Art Computer…");
+    expect(appLink.focused).toBe(true);
   });
 
   it("on a desktop renders the app link as a local QR code with a caption and the code, with no link button", () => {
@@ -316,6 +326,7 @@ describe("createPairingDialog", () => {
     expect(svg.getAttribute("aria-label")).toBe(defaultPairingDialogCopy.qrLabel);
     expect(required(panel.find("ff-ac-pairing-caption"), "caption").textContent).toBe("Scan with your phone camera or the Feral File app");
     expect(required(panel.find("ff-ac-pairing-code"), "code").textContent).toBe("482913");
+    expect(required(panel.find("ff-ac-pairing-code"), "code").focused).toBe(true);
   });
 
   it("honours an explicit layout", () => {

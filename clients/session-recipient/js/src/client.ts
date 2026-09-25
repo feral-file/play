@@ -220,7 +220,13 @@ async function jsonResponse(
   if (!response.ok) {
     throw new PlayError(`${errorPrefix}: ${String(response.status)}`, codeByStatus?.[response.status] ?? defaultCode);
   }
-  return response.json() as Promise<unknown>;
+  try {
+    return await response.json() as unknown;
+  } catch {
+    // Never rethrow the parse error: a SyntaxError quotes the body, which can
+    // carry broker or session tokens.
+    throw new Error(`${errorPrefix}: invalid response`);
+  }
 }
 
 function defaultFetch(): typeof fetch {
@@ -664,12 +670,27 @@ async function waitForPeer(context: PairingContext, channel: BrowserChannel, loc
       throw new ChannelGoneError();
     }
     let poll: PollMessagesResponse | undefined;
+    // Bound each poll by the channel deadline too, so a stalled request cannot
+    // hold the dialog on an expired code.
+    const pollController = new AbortController();
+    const onCancel = (): void => {
+      pollController.abort();
+    };
+    context.signal?.addEventListener("abort", onCancel, { once: true });
+    const deadlineTimer = setTimeout(onCancel, Math.max(0, localDeadline - Date.now()));
     try {
-      poll = await pollMessages({ fetcher: context.fetcher, channel, afterSeq: 0, signal: context.signal });
+      poll = await pollMessages({ fetcher: context.fetcher, channel, afterSeq: 0, signal: pollController.signal });
     } catch (error) {
+      throwIfAborted(context.signal);
+      if (pollController.signal.aborted) {
+        throw new ChannelGoneError();
+      }
       if (!(error instanceof TypeError)) {
         throw error;
       }
+    } finally {
+      clearTimeout(deadlineTimer);
+      context.signal?.removeEventListener("abort", onCancel);
     }
     if (poll?.peer !== undefined) {
       return poll.peer;
@@ -819,12 +840,15 @@ export async function requestEphemeralSession(options: RequestEphemeralSessionOp
         requestedExpiresInSeconds,
         maxWaitMs: options.maxWaitMs ?? 300_000
       });
+      // A cancel that lands while the result is decrypted still wins.
+      throwIfAborted(signal);
       if (storage !== undefined) {
         storeEphemeralBrowserSession(storage, origin, session);
       }
       return session;
     } catch (error) {
-      await closeChannel(fetcher, channel);
+      // Fire and forget: a slow DELETE must not hold up cancel or regeneration.
+      void closeChannel(fetcher, channel);
       if (signal?.aborted === true) {
         throw canceledError();
       }

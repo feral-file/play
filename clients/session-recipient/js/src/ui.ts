@@ -349,6 +349,9 @@ export function createPairingDialog(options: PairingDialogOptions): PairingDialo
       setStatus(copy.waitingStatus);
       if (!ownerDocument.body.contains(overlay)) {
         ownerDocument.body.append(overlay);
+        // Move focus into the modal: the app link on a phone, the code on a desktop.
+        const appLink = primary.querySelector("a");
+        (appLink ?? code).focus();
       }
     },
     setStatus,

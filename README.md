@@ -15,9 +15,10 @@ end-to-end encrypted mint request/response messages, and shows the visitor an
 app link (a button on a phone, a QR on a desktop) and a six-digit code. The
 Feral File mobile app brings the visitor's FF1 to that channel. On the device,
 `feral-controld` embeds the [Go ephemeral token minter](clients/ephemeral-token-minter/go),
-which joins the channel, answers the site's request, asks the owner for
-approval in the Feral File mobile app via `ff-relayer`, and mints a revokable
-browser session scoped to the display path. The full flow is documented in
+which joins the channel and carries the site's encrypted request and the
+result; `feral-controld` asks the owner for approval in the Feral File mobile
+app via `ff-relayer` and mints a revokable browser session scoped to the
+display path. The full flow is documented in
 [docs/sequential-flow.md](docs/sequential-flow.md).
 
 The hosted broker at `https://handoff.feralfile.com`, the mobile-app approval,
