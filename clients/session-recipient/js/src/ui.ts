@@ -54,8 +54,8 @@ export type PairingDialogClassNames = {
 };
 
 /**
- * `auto` (the default) picks the phone layout on a touch device with a
- * phone-sized viewport and the QR layout everywhere else.
+ * `auto` (the default) picks the app-link layout on a touch device (phone or
+ * tablet) and the QR layout on pointer devices.
  */
 export type PairingDialogLayout = "auto" | "mobile" | "desktop";
 
@@ -136,8 +136,6 @@ type OptionalBrowserGlobals = {
 const dialogStyleElementId = "ff-art-computer-pairing-ui-style";
 const defaultButtonLabel = "Play on Art Computer";
 const svgNamespace = "http://www.w3.org/2000/svg";
-/** Largest viewport short side, in CSS pixels, treated as a phone. */
-const phoneShortSideMaxPx = 600;
 /** Expired channels the wrapped flow replaces before giving up. */
 const wrappedChannelRegenerations = 2;
 const qrQuietZoneModules = 4;
@@ -185,18 +183,18 @@ export function hasStoredEphemeralBrowserSession(storage: TokenStorage, origin: 
 }
 
 /**
- * True on a touch device (coarse pointer or touch points) whose viewport is
- * phone-sized. That visitor has the Feral File app on the device in hand, so
- * the dialog offers the app link as a button rather than a QR to scan.
+ * True on a touch device (coarse pointer or touch points), whatever its
+ * viewport. A phone or tablet cannot scan a QR shown on its own screen and can
+ * hold the Feral File app, so the dialog offers the app link as a button;
+ * pointer devices get the QR.
  */
-export function isPhoneLikeViewport(view: Window | null | undefined): boolean {
+export function isTouchDevice(view: Window | null | undefined): boolean {
   if (view === null || view === undefined) {
     return false;
   }
   const coarsePointer = typeof view.matchMedia === "function" && view.matchMedia("(pointer: coarse)").matches;
   const touchPoints = typeof view.navigator === "object" && view.navigator.maxTouchPoints > 0;
-  const shortSide = Math.min(view.innerWidth, view.innerHeight);
-  return (coarsePointer || touchPoints) && shortSide > 0 && shortSide <= phoneShortSideMaxPx;
+  return coarsePointer || touchPoints;
 }
 
 /** Renders `text` as an inline SVG QR code, locally, with no network fetch. */
@@ -235,7 +233,7 @@ export function createPairingDialog(options: PairingDialogOptions): PairingDialo
   ensureDefaultStyles(ownerDocument);
   const copy = { ...defaultPairingDialogCopy, ...options.copy };
   const layout = options.layout ?? "auto";
-  const mobile = layout === "mobile" || (layout === "auto" && isPhoneLikeViewport(ownerDocument.defaultView));
+  const mobile = layout === "mobile" || (layout === "auto" && isTouchDevice(ownerDocument.defaultView));
 
   const overlay = ownerDocument.createElement("div");
   overlay.className = className("ff-ac-pairing-overlay", options.classNames?.overlay);

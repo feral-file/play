@@ -16,11 +16,11 @@ What the visitor experiences:
 
 1. They press **Play on Art Computer** on your site.
 2. First time only, a pairing dialog opens:
-   - **On a phone**, it shows **Open the Feral File app**. They tap it, the app
+   - **On a phone or tablet**, it shows **Open the Feral File app**. They tap it, the app
      opens with the request, and they tap **Accept**. Below the button is a
      six-digit code they can type into the app instead; tapping the code
      copies it.
-   - **On a desktop**, it shows a QR code. They scan it with the phone camera
+   - **On a desktop or laptop**, it shows a QR code. They scan it with the phone camera
      or the Feral File app, and tap **Accept** in the app. The same six-digit
      code sits under the QR for typing in the app instead.
 
@@ -101,8 +101,8 @@ Useful options (see `PlayOnArtComputerButtonOptions` in
   while keeping the pairing sequence (`PairingDialogCopy` and
   `PairingDialogClassNames` in [`ui.ts`](../clients/session-recipient/js/src/ui.ts)).
   `dialog.layout` forces `"mobile"` or `"desktop"`; the default, `"auto"`,
-  picks the app button on a touch device with a phone-sized viewport and the
-  QR everywhere else.
+  picks the app button on any touch device (a phone or tablet cannot scan a
+  QR on its own screen) and the QR on pointer devices.
 - `appLinkBaseUrl` — where the app link points. Defaults to
   `https://link.feralfile.com/pair`; the library appends
   `?channel=<id>&token=<pairingToken>`. That page opens the Feral File app

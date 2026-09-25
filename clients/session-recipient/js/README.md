@@ -62,9 +62,9 @@ session exists, so `connect-src` needs the relayer origin up front: the
 [Integration Guide](../../../docs/integration.md#network-endpoints) lists the
 hosts to allow.
 
-On a phone (a touch device with a phone-sized viewport) the dialog shows an
+On a touch device (phone or tablet) the dialog shows an
 **Open the Feral File app** link and, below it, the six-digit code, which
-copies on tap. On a desktop it shows a QR code of the app link, drawn in the
+copies on tap. On a pointer device it shows a QR code of the app link, drawn in the
 page with the bundled `qrcode-generator` (no image request), captioned "Scan
 with your phone camera or the Feral File app", with the code below. A status
 line reads "Waiting for your Art Computer…" and then "Approve in the Feral

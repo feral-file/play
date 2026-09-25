@@ -6,7 +6,7 @@ import {
   createPairingDialog,
   defaultPairingDialogCopy,
   hasStoredEphemeralBrowserSession,
-  isPhoneLikeViewport,
+  isTouchDevice,
   mountPlayOnArtComputerButton,
   pairingErrorMessage,
   renderQrSvg,
@@ -284,18 +284,19 @@ describe("pairing dialog copy", () => {
 
 describe("layout detection", () => {
   it.each([
-    { name: "a phone", view: phoneView(), phone: true },
-    { name: "a phone in landscape", view: fakeView({ width: 844, height: 390, coarse: true, touchPoints: 5 }), phone: true },
-    { name: "a touch-only phone without a coarse-pointer query", view: fakeView({ width: 390, height: 844, coarse: false, touchPoints: 5 }), phone: true },
-    { name: "a desktop", view: desktopView(), phone: false },
-    { name: "a narrow desktop window", view: fakeView({ width: 400, height: 900, coarse: false, touchPoints: 0 }), phone: false },
-    { name: "a tablet", view: fakeView({ width: 1024, height: 1366, coarse: true, touchPoints: 5 }), phone: false }
-  ])("treats $name as phone=$phone", ({ view, phone }) => {
-    expect(isPhoneLikeViewport(view as unknown as Window)).toBe(phone);
+    { name: "a phone", view: phoneView(), touch: true },
+    { name: "a phone in landscape", view: fakeView({ width: 844, height: 390, coarse: true, touchPoints: 5 }), touch: true },
+    { name: "a touch-only phone without a coarse-pointer query", view: fakeView({ width: 390, height: 844, coarse: false, touchPoints: 5 }), touch: true },
+    { name: "a tablet", view: fakeView({ width: 1024, height: 1366, coarse: true, touchPoints: 5 }), touch: true },
+    { name: "a large touch screen", view: fakeView({ width: 1920, height: 1080, coarse: false, touchPoints: 10 }), touch: true },
+    { name: "a desktop", view: desktopView(), touch: false },
+    { name: "a narrow desktop window", view: fakeView({ width: 400, height: 900, coarse: false, touchPoints: 0 }), touch: false }
+  ])("treats $name as touch=$touch", ({ view, touch }) => {
+    expect(isTouchDevice(view as unknown as Window)).toBe(touch);
   });
 
-  it("falls back to the desktop layout without a window", () => {
-    expect(isPhoneLikeViewport(null)).toBe(false);
+  it("falls back to the QR layout without a window", () => {
+    expect(isTouchDevice(null)).toBe(false);
   });
 });
 
@@ -327,6 +328,12 @@ describe("createPairingDialog", () => {
     expect(required(panel.find("ff-ac-pairing-caption"), "caption").textContent).toBe("Scan with your phone camera or the Feral File app");
     expect(required(panel.find("ff-ac-pairing-code"), "code").textContent).toBe("482913");
     expect(required(panel.find("ff-ac-pairing-code"), "code").focused).toBe(true);
+  });
+
+  it("on a tablet offers the app link as a button, not a QR", () => {
+    const { fake } = openDialog(fakeView({ width: 1024, height: 1366, coarse: true, touchPoints: 5 }));
+    expect(fake.body.find("ff-ac-pairing-app-link")).toBeDefined();
+    expect(fake.body.findTag("svg")).toBeUndefined();
   });
 
   it("honours an explicit layout", () => {
