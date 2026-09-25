@@ -309,6 +309,16 @@ sender authorization, recipient role, and size limits only.
 - Expire channel: persist expired status or delete channel-related records from
   durable state. Do not rely on process memory.
 
+## Client Address
+
+Per-source rate limits (browser channel creates and the short-code resolve
+aggregate) key on the client host, stored hashed. By default that is the TCP
+peer. With `BROKER_TRUST_PROXY=true` it is the last `X-Forwarded-For` entry,
+which the reverse proxy appends, so a client cannot replace it; the broker falls
+back to the TCP peer when the header is absent or unparsable. The production
+deployment runs behind Caddy and sets `BROKER_TRUST_PROXY=true`. Log lines that
+print the remote use the same resolved address.
+
 ## Logging
 
 Logs may include `channelId`, status transitions, response codes, and bounded

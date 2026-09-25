@@ -21,6 +21,17 @@ Run locally:
 BROKER_DB_PATH=./mint-pairing.db ADDR=:8080 go run .
 ```
 
+Configuration:
+
+| Env | Default | Meaning |
+| :-- | :-- | :-- |
+| `ADDR` | `:8080` | Listen address. |
+| `BROKER_DB_PATH` | `/data/mint-pairing.db` | bbolt database file. |
+| `BROKER_BASE_URL` | request host | Public base URL written into pairing payloads. |
+| `BROKER_TRUST_PROXY` | `false` | `true` takes the client address for per-source rate limits (browser channel creates, short-code resolves) and logs from the last `X-Forwarded-For` entry, which the reverse proxy appends; it falls back to the connection address when the header is absent or unparsable. Set it only when every request arrives through that proxy, otherwise clients can choose their own rate-limit bucket. |
+
+Production (`handoff.feralfile.com`) runs behind Caddy, so every connection comes from Caddy's address; the deployment sets `BROKER_TRUST_PROXY=true`. Without it all sites would share one rate-limit bucket.
+
 Build the container:
 
 ```sh

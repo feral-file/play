@@ -80,12 +80,17 @@ type Config struct {
 	Addr          string
 	DBPath        string
 	BrokerBaseURL string
-	Now           func() time.Time
+	// TrustProxy makes the broker take the client address from the last
+	// X-Forwarded-For entry, which the reverse proxy in front of it appends.
+	// Only enable it when every request arrives through such a proxy.
+	TrustProxy bool
+	Now        func() time.Time
 }
 
 type Broker struct {
 	db            *bolt.DB
 	brokerBaseURL string
+	trustProxy    bool
 	now           func() time.Time
 }
 
@@ -241,6 +246,7 @@ func main() {
 		Addr:          getenv("ADDR", defaultAddr),
 		DBPath:        getenv("BROKER_DB_PATH", defaultDBPath),
 		BrokerBaseURL: os.Getenv("BROKER_BASE_URL"),
+		TrustProxy:    getenv("BROKER_TRUST_PROXY", "false") == "true",
 	}
 	broker, err := NewBroker(cfg)
 	if err != nil {
@@ -274,6 +280,7 @@ func NewBroker(cfg Config) (*Broker, error) {
 	b := &Broker{
 		db:            db,
 		brokerBaseURL: strings.TrimRight(cfg.BrokerBaseURL, "/"),
+		trustProxy:    cfg.TrustProxy,
 		now:           cfg.Now,
 	}
 	if b.now == nil {
@@ -316,7 +323,7 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if status == 0 {
 		status = http.StatusOK
 	}
-	log.Printf("broker_http method=%s path=%s status=%d duration_ms=%d remote=%s", r.Method, r.URL.Path, status, time.Since(start).Milliseconds(), remoteHost(r.RemoteAddr))
+	log.Printf("broker_http method=%s path=%s status=%d duration_ms=%d remote=%s", r.Method, r.URL.Path, status, time.Since(start).Milliseconds(), b.clientHost(r))
 }
 
 func (b *Broker) serveHTTP(w http.ResponseWriter, r *http.Request) {
@@ -448,7 +455,7 @@ func (b *Broker) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 			// Site-created channels are rate limited per source host with the
 			// same window and thresholds as the short-code resolve aggregate
 			// limit. Minter-created channels keep today's behaviour.
-			attemptKey := createSourceAttemptKey(shortCodeResolveSourceKey(r.RemoteAddr))
+			attemptKey := createSourceAttemptKey(sourceKey(b.clientHost(r)))
 			limited, err := rateLimitAttempt(tx, attemptKey, now)
 			if err != nil {
 				return err
@@ -511,7 +518,7 @@ func (b *Broker) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if code != "" {
-		log.Printf("create_channel creator_role=%s origin_host=%s status=%d outcome=%s remote=%s", creatorRole, originHost(record.Origin), status, code, remoteHost(r.RemoteAddr))
+		log.Printf("create_channel creator_role=%s origin_host=%s status=%d outcome=%s remote=%s", creatorRole, originHost(record.Origin), status, code, b.clientHost(r))
 		writeError(w, status, code)
 		return
 	}
@@ -791,7 +798,7 @@ func (b *Broker) handleResolvePairingCode(w http.ResponseWriter, r *http.Request
 
 	now := b.now().UTC()
 	shortCodeHash := hashString(req.ShortCode)
-	resolveSourceKey := shortCodeResolveSourceKey(r.RemoteAddr)
+	resolveSourceKey := sourceKey(b.clientHost(r))
 	var response ResolvePairingCodeResponse
 	var status int
 	var code string
@@ -876,7 +883,7 @@ func (b *Broker) handleResolvePairingCode(w http.ResponseWriter, r *http.Request
 			status,
 			code,
 			logEdge(resolvedChannelID),
-			remoteHost(r.RemoteAddr),
+			b.clientHost(r),
 		)
 		writeError(w, status, code)
 		return
@@ -887,7 +894,7 @@ func (b *Broker) handleResolvePairingCode(w http.ResponseWriter, r *http.Request
 		logHashPrefix(shortCodeHash),
 		http.StatusOK,
 		logEdge(response.ChannelID),
-		remoteHost(r.RemoteAddr),
+		b.clientHost(r),
 	)
 	writeJSON(w, http.StatusOK, response)
 }
@@ -1700,15 +1707,44 @@ func shortCodeResolveAggregateAttemptKey(sourceKey string) string {
 	return "resolve:source:" + sourceKey
 }
 
-func shortCodeResolveSourceKey(remoteAddr string) string {
-	source := remoteAddr
-	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
-		source = host
+// sourceKey is the durable rate-limit key for a client host. The host is
+// hashed so raw client addresses are not stored.
+func sourceKey(host string) string {
+	if host == "" {
+		host = "unknown"
 	}
-	if source == "" {
-		source = "unknown"
+	return hashString(host)
+}
+
+// clientHost is the client address used for per-source rate limits and logs.
+// Behind a trusted reverse proxy it is the last X-Forwarded-For entry: the proxy
+// appends the peer it saw, so a client can prepend entries but cannot replace the
+// last one. It falls back to the connection's remote address when the header is
+// absent or its last entry is not an IP address.
+func (b *Broker) clientHost(r *http.Request) string {
+	if b.trustProxy {
+		if host, ok := lastForwardedFor(r.Header.Values("X-Forwarded-For")); ok {
+			return host
+		}
 	}
-	return hashString(source)
+	return remoteHost(r.RemoteAddr)
+}
+
+func lastForwardedFor(values []string) (string, bool) {
+	if len(values) == 0 {
+		return "", false
+	}
+	entries := strings.Split(values[len(values)-1], ",")
+	last := strings.TrimSpace(entries[len(entries)-1])
+	if host, _, err := net.SplitHostPort(last); err == nil {
+		last = host
+	}
+	last = strings.Trim(last, "[]")
+	ip := net.ParseIP(last)
+	if ip == nil {
+		return "", false
+	}
+	return ip.String(), true
 }
 
 func remoteHost(remoteAddr string) string {

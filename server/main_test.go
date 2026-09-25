@@ -1288,3 +1288,123 @@ func remarshal(t *testing.T, in any, out any) {
 		t.Fatalf("remarshal decode: %v", err)
 	}
 }
+
+func newBrokerWithTrustProxy(t *testing.T, trustProxy bool) *Broker {
+	t.Helper()
+	now := time.Date(2026, 9, 25, 10, 0, 0, 0, time.UTC)
+	broker, err := NewBroker(Config{
+		DBPath:        filepath.Join(t.TempDir(), "broker.db"),
+		BrokerBaseURL: "https://pairing.test",
+		TrustProxy:    trustProxy,
+		Now:           func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewBroker: %v", err)
+	}
+	t.Cleanup(func() { _ = broker.Close() })
+	return broker
+}
+
+func browserCreateBody() CreateChannelRequest {
+	return CreateChannelRequest{
+		Algorithm:           algorithm,
+		CreatorRole:         roleBrowser,
+		BrowserPublicKeyJWK: testPublicJWK,
+		IdleTTLSeconds:      15,
+	}
+}
+
+// proxyAddr stands in for the reverse proxy: every request reaches the broker
+// from the same connection address.
+const proxyAddr = "10.0.0.2:44321"
+
+func TestTrustProxySeparatesSourcesByLastForwardedFor(t *testing.T) {
+	broker := newBrokerWithTrustProxy(t, true)
+	create := func(forwardedFor string) (int, string) {
+		t.Helper()
+		return postJSONWithHeaders(t, broker, proxyAddr, "/v1/channels", map[string]string{
+			"Origin":          testSiteOrigin,
+			"X-Forwarded-For": forwardedFor,
+		}, browserCreateBody(), nil)
+	}
+	for i := 0; i < shortCodeAttemptLimit; i++ {
+		if status, errCode := create("198.51.100.30"); status != http.StatusCreated {
+			t.Fatalf("create %d from peer A status/error = %d/%q, want 201", i, status, errCode)
+		}
+	}
+	if status, errCode := create("198.51.100.30"); status != http.StatusTooManyRequests || errCode != "rate_limited" {
+		t.Fatalf("over-limit create from peer A status/error = %d/%q, want 429/rate_limited", status, errCode)
+	}
+	// A client-supplied entry ahead of the proxy's own does not change the source.
+	if status, errCode := create("203.0.113.99, 198.51.100.30"); status != http.StatusTooManyRequests {
+		t.Fatalf("spoofed-prefix create status/error = %d/%q, want 429", status, errCode)
+	}
+	if status, errCode := create("198.51.100.31"); status != http.StatusCreated || errCode != "" {
+		t.Fatalf("create from peer B behind the same proxy status/error = %d/%q, want 201", status, errCode)
+	}
+
+	// The resolve aggregate limit uses the same source.
+	for misses, candidate := 0, 0; misses < shortCodeAttemptLimit; candidate++ {
+		status, errCode := postJSONWithHeaders(t, broker, proxyAddr, "/v1/pairing-codes/resolve", map[string]string{"X-Forwarded-For": "198.51.100.40"}, ResolvePairingCodeRequest{ShortCode: fmt.Sprintf("%06d", candidate)}, nil)
+		if status != http.StatusNotFound || errCode != "not_found" {
+			t.Fatalf("resolve miss %d status/error = %d/%q, want 404", misses, status, errCode)
+		}
+		misses++
+	}
+	status, errCode := postJSONWithHeaders(t, broker, proxyAddr, "/v1/pairing-codes/resolve", map[string]string{"X-Forwarded-For": "198.51.100.40"}, ResolvePairingCodeRequest{ShortCode: "999999"}, nil)
+	if status != http.StatusTooManyRequests || errCode != "rate_limited" {
+		t.Fatalf("limited resolve status/error = %d/%q, want 429", status, errCode)
+	}
+	status, errCode = postJSONWithHeaders(t, broker, proxyAddr, "/v1/pairing-codes/resolve", map[string]string{"X-Forwarded-For": "198.51.100.41"}, ResolvePairingCodeRequest{ShortCode: "999999"}, nil)
+	if status != http.StatusNotFound || errCode != "not_found" {
+		t.Fatalf("resolve from another peer status/error = %d/%q, want 404", status, errCode)
+	}
+}
+
+func TestTrustProxyOffIgnoresForwardedFor(t *testing.T) {
+	broker := newBrokerWithTrustProxy(t, false)
+	for i := 0; i < shortCodeAttemptLimit; i++ {
+		status, errCode := postJSONWithHeaders(t, broker, proxyAddr, "/v1/channels", map[string]string{
+			"Origin":          testSiteOrigin,
+			"X-Forwarded-For": fmt.Sprintf("198.51.100.%d", 50+i),
+		}, browserCreateBody(), nil)
+		if status != http.StatusCreated {
+			t.Fatalf("create %d status/error = %d/%q, want 201", i, status, errCode)
+		}
+	}
+	status, errCode := postJSONWithHeaders(t, broker, proxyAddr, "/v1/channels", map[string]string{
+		"Origin":          testSiteOrigin,
+		"X-Forwarded-For": "198.51.100.99",
+	}, browserCreateBody(), nil)
+	if status != http.StatusTooManyRequests || errCode != "rate_limited" {
+		t.Fatalf("create with a fresh X-Forwarded-For and trust off status/error = %d/%q, want 429", status, errCode)
+	}
+}
+
+func TestClientHostFallsBackToRemoteAddr(t *testing.T) {
+	trusting := &Broker{trustProxy: true}
+	tests := []struct {
+		name   string
+		header []string
+		want   string
+	}{
+		{name: "no header", want: "10.0.0.2"},
+		{name: "empty header", header: []string{""}, want: "10.0.0.2"},
+		{name: "unparsable last entry", header: []string{"198.51.100.1, not-an-ip"}, want: "10.0.0.2"},
+		{name: "last entry of last header", header: []string{"198.51.100.1", "203.0.113.7, 198.51.100.2"}, want: "198.51.100.2"},
+		{name: "ipv6", header: []string{"2001:db8::1"}, want: "2001:db8::1"},
+		{name: "ip with port", header: []string{"198.51.100.3:5555"}, want: "198.51.100.3"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/channels", nil)
+			req.RemoteAddr = proxyAddr
+			for _, value := range tt.header {
+				req.Header.Add("X-Forwarded-For", value)
+			}
+			if got := trusting.clientHost(req); got != tt.want {
+				t.Fatalf("clientHost = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
