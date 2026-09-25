@@ -65,6 +65,9 @@ type Channel struct {
 	publicKeyJWK PublicJWK
 	display      PairingDisplay
 
+	// expiresAt is the channel expiry the broker reported at create or join.
+	expiresAt time.Time
+
 	// joined is set for a channel a browser created and this minter joined.
 	joined           bool
 	requester        JoinedRequester
@@ -120,6 +123,7 @@ func (c *Client) StartChannel(ctx context.Context, opts StartChannelOptions) (*C
 		privateKey:   privateKey,
 		publicKeyJWK: publicJWK,
 		display:      display,
+		expiresAt:    response.ExpiresAt,
 	}, nil
 }
 
@@ -209,6 +213,7 @@ func (c *Client) JoinChannel(ctx context.Context, opts JoinChannelOptions) (*Cha
 			BrowserInfo: browserInfo,
 		},
 		joinedBrowserJWK: *response.BrowserPublicKeyJWK,
+		expiresAt:        response.ExpiresAt,
 	}, nil
 }
 
@@ -217,6 +222,15 @@ func (c *Client) JoinChannel(ctx context.Context, opts JoinChannelOptions) (*Cha
 // created.
 func (ch *Channel) Requester() JoinedRequester {
 	return ch.requester
+}
+
+// ExpiresAt returns the channel expiry the broker reported when this minter
+// created or joined the channel. The broker's deadline is idle-based: each
+// accepted message moves it later (SendMessageResult.ExpiresAt reports the new
+// value), so this is the deadline for the pairing to make progress, not a hard
+// end of the channel.
+func (ch *Channel) ExpiresAt() time.Time {
+	return ch.expiresAt
 }
 
 // ChannelID returns the broker channel id.

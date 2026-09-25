@@ -706,6 +706,8 @@ type joinHarness struct {
 	joinStatus  int
 	joinCode    string
 	creatorRole string
+	// joinExpiresAt, when set, is the expiresAt the join endpoint reports.
+	joinExpiresAt time.Time
 }
 
 func newJoinHarness(t *testing.T) *joinHarness {
@@ -756,7 +758,7 @@ func newJoinHarness(t *testing.T) *joinHarness {
 				"browserPublicKeyJwk": h.browserJWK,
 				"origin":              h.origin,
 				"browserInfo":         map[string]string{"name": "Art Blocks", "label": "artblocks.io", "userAgent": "test", "extra": "ignored"},
-				"expiresAt":           time.Now().Add(5 * time.Minute).UTC(),
+				"expiresAt":           joinExpiry(h.joinExpiresAt),
 				"nextSeq":             1,
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/channels/ch_site/messages":
@@ -969,6 +971,20 @@ func TestPollMintRequestOtherErrorsReturnNoRequest(t *testing.T) {
 	}
 }
 
+func TestChannelExpiresAtFromBroker(t *testing.T) {
+	created := newChannelHarness(t)
+	if created.channel.ExpiresAt().IsZero() || !created.channel.ExpiresAt().Equal(created.channel.PairingDisplay().ExpiresAt) {
+		t.Fatalf("created channel ExpiresAt = %v, display = %v", created.channel.ExpiresAt(), created.channel.PairingDisplay().ExpiresAt)
+	}
+
+	h := newJoinHarness(t)
+	h.joinExpiresAt = time.Date(2026, 9, 25, 21, 0, 0, 0, time.UTC)
+	channel := h.join(t, JoinChannelOptions{ChannelID: "ch_site", PairingToken: "pt_secret"})
+	if !channel.ExpiresAt().Equal(h.joinExpiresAt) {
+		t.Fatalf("joined channel ExpiresAt = %v, want %v", channel.ExpiresAt(), h.joinExpiresAt)
+	}
+}
+
 func TestCreatedChannelHasNoRequester(t *testing.T) {
 	h := newChannelHarness(t)
 	if requester := h.channel.Requester(); requester != (JoinedRequester{}) {
@@ -1028,4 +1044,11 @@ func TestJoinChannelValidatesOptions(t *testing.T) {
 			}
 		})
 	}
+}
+
+func joinExpiry(fixed time.Time) time.Time {
+	if !fixed.IsZero() {
+		return fixed
+	}
+	return time.Now().Add(5 * time.Minute).UTC()
 }
