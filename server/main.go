@@ -530,13 +530,12 @@ func (b *Broker) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf(
-		"create_channel channel_id=%s creator_role=%s origin_host=%s short_code_requested=%t short_code_issued=%t short_code=%s short_code_hash=%s expires_at=%s idle_ttl_seconds=%d",
+		"create_channel channel_id=%s creator_role=%s origin_host=%s short_code_requested=%t short_code_issued=%t short_code_hash=%s expires_at=%s idle_ttl_seconds=%d",
 		logEdge(channelID),
 		creatorRole,
 		originHost(record.Origin),
 		req.ShortCodeRequested,
 		shortCode != "",
-		logEdge(shortCode),
 		logHashPrefix(record.ShortCodeHash),
 		record.ExpiresAt,
 		req.IdleTTLSeconds,
@@ -877,8 +876,7 @@ func (b *Broker) handleResolvePairingCode(w http.ResponseWriter, r *http.Request
 	}
 	if code != "" {
 		log.Printf(
-			"resolve_pairing_code short_code=%s short_code_hash=%s status=%d outcome=%s channel_id=%s remote=%s",
-			logEdge(req.ShortCode),
+			"resolve_pairing_code short_code_hash=%s status=%d outcome=%s channel_id=%s remote=%s",
 			logHashPrefix(shortCodeHash),
 			status,
 			code,
@@ -889,8 +887,7 @@ func (b *Broker) handleResolvePairingCode(w http.ResponseWriter, r *http.Request
 		return
 	}
 	log.Printf(
-		"resolve_pairing_code short_code=%s short_code_hash=%s status=%d outcome=resolved channel_id=%s remote=%s",
-		logEdge(req.ShortCode),
+		"resolve_pairing_code short_code_hash=%s status=%d outcome=resolved channel_id=%s remote=%s",
 		logHashPrefix(shortCodeHash),
 		http.StatusOK,
 		logEdge(response.ChannelID),
@@ -1757,6 +1754,9 @@ func remoteHost(remoteAddr string) string {
 	return remoteAddr
 }
 
+// logEdge shortens an identifier for logs. Use it for channel ids only: on a
+// six-digit short code the two edges are the whole code. Short codes are
+// logged as a hash prefix.
 func logEdge(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
