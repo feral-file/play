@@ -12,8 +12,11 @@ application data being transmitted.
 ## Goals
 
 - Provide a temporary channel identified by one `channelId`.
-- Support QR/deep-link and short-code pairing from the FF1 frontend to the NFT
-  display website.
+- Support site-initiated pairing: the NFT display website creates the channel
+  with an attested origin, and the minter joins it by pairing token (app link
+  or QR) or short code. Keep serving the legacy device-initiated pairing, where
+  the minter creates the channel and the website joins from the FF1 frontend's
+  QR/deep-link or short code.
 - Treat the QR pairing token as plaintext bootstrap material, not E2EE data.
 - Store only hashes for bearer tokens and short codes when validation is needed.
 - Support bidirectional E2EE message transmission on the same channel.
@@ -34,8 +37,9 @@ The two broker clients are:
 - `minter`: the Go ephemeral token minter library embedded in FF1
   `feral-controld`.
 
-The FF1 frontend displays pairing material produced by the minter. It is not a
-broker protocol participant unless a future implementation makes it one.
+Either role may create a channel (`creatorRole`); the other joins. In the legacy
+flow the FF1 frontend displays pairing material produced by the minter. It is
+not a broker protocol participant unless a future implementation makes it one.
 `ff-controller` and `ff-relayer` are outside the broker data plane; `feral-controld`
 uses them for approval and token minting after the Go minter library decrypts a
 browser request.
@@ -45,7 +49,7 @@ browser request.
 The QR/deep-link payload is intentionally not encrypted. It is bootstrap data
 that lets the NFT display website join the channel.
 
-Recommended QR payload:
+Legacy (minter-created) QR payload, displayed on the FF1:
 
 ```json
 {
@@ -60,6 +64,11 @@ Recommended QR payload:
   "minterPublicKeyJwk": {}
 }
 ```
+
+A browser-created channel returns a `v: 2` payload with `creatorRole: "browser"`,
+`browserPublicKeyJwk` and `origin` in place of `minterPublicKeyJwk` (see
+`docs/api-design.md`); the site turns it into an app link
+`https://link.feralfile.com/pair?channel=<id>&token=<pairingToken>`.
 
 `pairingToken` is a high-entropy bearer join secret. It may appear in the QR code
 or deep link shown on the FF1 display, but the server stores only
@@ -214,8 +223,11 @@ type ChannelRecord = {
   lastMessageAt: string;
   expiresAt: string;
   idleTtlSeconds: number;
-  minterPublicKeyJwk: JsonWebKey;
-  browserPublicKeyJwk?: JsonWebKey;
+  creatorRole?: "minter" | "browser"; // absent on older records = "minter"
+  minterPublicKeyJwk?: JsonWebKey;     // set at create or at join, by role
+  browserPublicKeyJwk?: JsonWebKey;    // set at create or at join, by role
+  origin?: string;                     // attested from the Origin header; browser creators only
+  browserInfo?: object;                // browser creators only
   pairingTokenHash: string;
   pairingConsumedAt?: string;
   shortCodeHash?: string;
@@ -235,7 +247,7 @@ type ParticipantRecord = {
 };
 ```
 
-The minter token is returned on channel creation. The browser token is returned
+The creator's participant token is returned on channel creation; the joiner's
 after a successful join. Raw participant tokens must never be stored.
 
 Storage:
@@ -276,11 +288,13 @@ sender authorization, recipient role, and size limits only.
   transaction.
 - Create channel: create `channels/<channelId>` and its `meta`, `participants`,
   and `messages` nested buckets; write channel metadata; write
-  `participants["minter"]`; write `pairing_tokens`; write optional
+  the creator's participant record; for a browser creator, record the attested
+  origin and count the create against the per-source rate limit; write `pairing_tokens`; write optional
   `short_codes`; and write the initial `cleanup_by_expiry` entry in one
   transaction.
-- Join channel: validate pairing token hash or short-code hash, reject expired or
-  consumed channels, write `participant:browser`, persist `browserPublicKeyJwk`,
+- Join channel: validate that the request carries the joiner role's key field,
+  validate pairing token hash or short-code hash, reject expired or consumed
+  channels, write the joiner's participant record, persist its public key,
   mark pairing consumed, delete the usable `pairing_tokens` entry, and update
   channel status in one transaction.
 - Append message: validate participant token hash, load channel, reject expired
