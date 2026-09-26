@@ -2,7 +2,7 @@
 
 `integration/` contains Vitest tests for cross-component behavior.
 
-Integration coverage should exercise the mint pairing flow described in [Sequential Flow](../docs/sequential-flow.md): NFT display website with embedded token requester library, Go ephemeral token minter embedded in FF1 `feral-controld`, FF1 frontend QR/code display, `ff-controller` approval UI reached through `ff-relayer`, FF1 display path, and the Mint Pairing Broker as the short-lived opaque E2EE transport.
+Integration coverage exercises the site-initiated mint pairing flow described in [Sequential Flow](../docs/sequential-flow.md): the NFT display website's requester library creates a channel on the Mint Pairing Broker, the Go ephemeral token minter embedded in FF1 `feral-controld` joins it (by the app link's channel and pairing token, or by the six-digit code), and the E2EE mint request and result travel through the broker as a short-lived opaque transport. `ff-controller` approval through `ff-relayer` and the FF1 display path sit outside these tests.
 
 ## Commands
 
@@ -17,7 +17,10 @@ npm test
 ```
 
 `npm test` builds the Go broker Docker image, launches it with an isolated
-temporary `/data` volume, and verifies the mint pairing sequence over HTTP.
+temporary `/data` volume, and verifies the mint pairing sequence over HTTP. The
+tests run under Node, whose `fetch` sends no `Origin` header, so they add the
+header a browser would send; the broker attests it for browser-created
+channels.
 
 ## Expectations
 

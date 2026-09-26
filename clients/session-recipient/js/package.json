@@ -1,6 +1,6 @@
 {
   "name": "@feralfile/play",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Add a Play on Art Computer button to your website: pair a visitor's browser with their Feral File Art Computer and play a DP-1 playlist on it.",
   "license": "Apache-2.0",
   "type": "module",
@@ -43,5 +43,8 @@
     "typescript": "^5.5.3",
     "typescript-eslint": "^8.35.1",
     "vitest": "^2.0.3"
+  },
+  "dependencies": {
+    "qrcode-generator": "^2.0.4"
   }
 }

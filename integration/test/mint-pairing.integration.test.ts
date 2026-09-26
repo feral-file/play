@@ -9,15 +9,18 @@ import {
   encryptChannelMessage,
   exportPublicJwk,
   generateBrowserKeyPair,
-  requestEphemeralSession
+  requestEphemeralSession,
+  type PairingMaterial
 } from "@feralfile/play";
 
-type CreateChannelResponse = {
+type JoinChannelResponse = {
   channelId: string;
+  role: "minter";
   minterToken: string;
-  pairingToken: string;
+  browserPublicKeyJwk: JsonWebKey;
+  origin: string;
   expiresAt: string;
-  qrPayload: unknown;
+  nextSeq: number;
 };
 
 type BrokerMessage = {
@@ -173,36 +176,42 @@ function waitForExit(child: HelperProcess): Promise<void> {
   });
 }
 
-async function startGoMinterHelper(baseUrl: string): Promise<{ child: HelperProcess; qrPayload: unknown; done: Promise<void> }> {
+type HelperCredential = { channelId: string; pairingToken: string } | { shortCode: string };
+
+function startGoMinterHelper(baseUrl: string, credential: HelperCredential): { child: HelperProcess; done: Promise<void> } {
+  const credentialEnv = "shortCode" in credential
+    ? { SHORT_CODE: credential.shortCode }
+    : { CHANNEL_ID: credential.channelId, PAIRING_TOKEN: credential.pairingToken };
   const child = spawn("go", ["run", "."], {
     cwd: join(repoRoot, "integration/go-minter-helper"),
-    env: { ...process.env, BROKER_BASE_URL: baseUrl },
+    env: { ...process.env, BROKER_BASE_URL: baseUrl, ...credentialEnv },
     stdio: ["ignore", "pipe", "pipe"]
   });
   helperProcesses.push(child);
-  const done = waitForExit(child);
-  let stdout = "";
-  const qrPayload = await new Promise<unknown>((resolveReady, reject) => {
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString("utf8");
-      const newlineIndex = stdout.indexOf("\n");
-      if (newlineIndex < 0) {
-        return;
-      }
-      const line = stdout.slice(0, newlineIndex);
-      try {
-        const ready = JSON.parse(line) as { qrPayload?: unknown };
-        resolveReady(ready.qrPayload);
-      } catch (error) {
-        reject(error instanceof Error ? error : new Error(String(error)));
-      }
-    });
-    child.on("error", reject);
-    child.on("exit", (code) => {
-      reject(new Error(`go minter helper exited before ready with code ${String(code)}`));
-    });
-  });
-  return { child, qrPayload, done };
+  return { child, done: waitForExit(child) };
+}
+
+/**
+ * Node's fetch does not add an Origin header; a browser does, on every
+ * cross-origin POST, and the broker attests it for browser-created channels.
+ * This stands in for the browser.
+ */
+function browserFetch(origin: string): typeof fetch {
+  return (input, init) => {
+    const headers = new Headers(init?.headers);
+    headers.set("origin", origin);
+    return fetch(input, { ...init, headers });
+  };
+}
+
+function credentialFromAppLink(material: PairingMaterial): { channelId: string; pairingToken: string } {
+  const link = new URL(material.appLink);
+  const channelId = link.searchParams.get("channel");
+  const pairingToken = link.searchParams.get("token");
+  if (channelId === null || pairingToken === null) {
+    throw new Error("app link is missing channel or token");
+  }
+  return { channelId, pairingToken };
 }
 
 async function readJSON<T>(response: Response): Promise<T> {
@@ -212,18 +221,13 @@ async function readJSON<T>(response: Response): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function createChannel(baseUrl: string, minterPublicKeyJwk: JsonWebKey): Promise<CreateChannelResponse> {
-  const response = await fetch(new URL("/v1/channels", baseUrl), {
+async function joinAsMinter(baseUrl: string, channelId: string, pairingToken: string, minterPublicKeyJwk: JsonWebKey): Promise<JoinChannelResponse> {
+  const response = await fetch(new URL(`/v1/channels/${channelId}/join`, baseUrl), {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      algorithm: "P256-HKDF-SHA256-AES-256-GCM",
-      minterPublicKeyJwk,
-      idleTtlSeconds: 60,
-      shortCodeRequested: true
-    })
+    body: JSON.stringify({ pairingToken, minterPublicKeyJwk })
   });
-  return readJSON<CreateChannelResponse>(response);
+  return readJSON<JoinChannelResponse>(response);
 }
 
 async function pollForBrowserRequest(input: {
@@ -304,13 +308,6 @@ async function sendMintSuccess(input: {
   expect(response.status).toBe(201);
 }
 
-function qrPayloadForBroker(qrPayload: unknown, brokerBaseUrl: string): unknown {
-  if (typeof qrPayload !== "object" || qrPayload === null || Array.isArray(qrPayload)) {
-    throw new Error("created channel omitted QR payload object");
-  }
-  return { ...qrPayload, brokerBaseUrl };
-}
-
 beforeAll(() => {
   docker(["build", "-f", "server/Dockerfile", "-t", imageTag, "server"]);
 }, 120_000);
@@ -348,19 +345,41 @@ afterAll(() => {
   }
 });
 
-describe("mint pairing integration", () => {
-  it("pairs JS requester with the Go minter through a Dockerized broker", async () => {
-    const broker = await startBroker();
-    const helper = await startGoMinterHelper(broker.baseUrl);
-    try {
-      const browserSessionPromise = requestEphemeralSession({
-        pairing: { qrPayload: qrPayloadForBroker(helper.qrPayload, broker.baseUrl) },
-        browserInfo: { name: "Integration Browser" },
-        storage: false,
-        pollIntervalMs: 50,
-        maxWaitMs: 10_000
-      });
+function waitForMaterial(): { onPairingMaterial: (material: PairingMaterial) => void; material: Promise<PairingMaterial> } {
+  let resolveMaterial: ((material: PairingMaterial) => void) | undefined;
+  const material = new Promise<PairingMaterial>((resolveWait) => {
+    resolveMaterial = resolveWait;
+  });
+  return {
+    onPairingMaterial: (value) => {
+      resolveMaterial?.(value);
+    },
+    material
+  };
+}
 
+describe("site-initiated mint pairing integration", () => {
+  it.each([
+    { name: "the app link's channel and pairing token", credential: (material: PairingMaterial): HelperCredential => credentialFromAppLink(material) },
+    { name: "the six-digit code", credential: (material: PairingMaterial): HelperCredential => ({ shortCode: material.shortCode }) }
+  ])("the Go minter joins the browser's channel with $name and delivers the session", async ({ credential }) => {
+    const broker = await startBroker();
+    const pairing = waitForMaterial();
+    const browserSessionPromise = requestEphemeralSession({
+      brokerBaseUrl: broker.baseUrl,
+      appLinkBaseUrl: "https://link.feralfile.com/pair",
+      browserInfo: { name: "Integration Browser" },
+      storage: false,
+      pollIntervalMs: 50,
+      maxWaitMs: 10_000,
+      fetchImpl: browserFetch(testOrigin),
+      onPairingMaterial: pairing.onPairingMaterial
+    });
+    const material = await pairing.material;
+    expect(material.appLink).toMatch(/^https:\/\/link\.feralfile\.com\/pair\?channel=ch_[^&]+&token=pt_/);
+    expect(material.shortCode).toMatch(/^[0-9]{6}$/);
+    const helper = startGoMinterHelper(broker.baseUrl, credential(material));
+    try {
       await expect(browserSessionPromise).resolves.toEqual({
         token: "go-integration-browser-session-token",
         sessionId: "eps_go_integration",
@@ -371,46 +390,59 @@ describe("mint pairing integration", () => {
     } finally {
       stopHelper(helper.child);
     }
-  }, 30_000);
+  }, 60_000);
 
-  it("pairs browser and minter through a Dockerized bbolt broker and survives broker restart", async () => {
+  it("pairs through a Dockerized bbolt broker that restarts before the join and before the result", async () => {
     const firstBroker = await startBroker();
-    const minterKeyPair = await generateBrowserKeyPair();
-    const minterPublicKeyJwk = await exportPublicJwk(minterKeyPair.publicKey);
-    const created = await createChannel(firstBroker.baseUrl, minterPublicKeyJwk);
-
-    stopBroker(firstBroker.containerId);
-    const broker = await startBroker(firstBroker.dataDir);
-
+    const brokerPort = new URL(firstBroker.baseUrl).port;
+    const pairing = waitForMaterial();
+    let joined = false;
     const browserSessionPromise = requestEphemeralSession({
-      pairing: { qrPayload: qrPayloadForBroker(created.qrPayload, broker.baseUrl) },
+      brokerBaseUrl: firstBroker.baseUrl,
       browserInfo: { name: "Integration Browser" },
       storage: false,
       pollIntervalMs: 50,
-      maxWaitMs: 10_000
+      maxWaitMs: 10_000,
+      fetchImpl: browserFetch(testOrigin),
+      onPairingMaterial: pairing.onPairingMaterial,
+      onPeerJoined: () => {
+        joined = true;
+      }
     });
+    const { channelId, pairingToken } = credentialFromAppLink(await pairing.material);
+
+    stopBroker(firstBroker.containerId);
+    const broker = await startBroker(firstBroker.dataDir, brokerPort);
+
+    const minterKeyPair = await generateBrowserKeyPair();
+    const minterPublicKeyJwk = await exportPublicJwk(minterKeyPair.publicKey);
+    const join = await joinAsMinter(broker.baseUrl, channelId, pairingToken, minterPublicKeyJwk);
+    expect(join.role).toBe("minter");
+    expect(join.origin).toBe(testOrigin);
 
     const { plaintext } = await pollForBrowserRequest({
       baseUrl: broker.baseUrl,
-      channelId: created.channelId,
-      minterToken: created.minterToken,
+      channelId,
+      minterToken: join.minterToken,
       minterPrivateKey: minterKeyPair.privateKey
     });
+    expect(joined).toBe(true);
     expect(plaintext).toMatchObject({
       v: 1,
       type: "mint_request",
-      channelId: created.channelId,
-      origin: testOrigin
+      channelId,
+      origin: testOrigin,
+      supportsPersistentSessions: true
     });
+    expect(plaintext.browserPublicKeyJwk).toEqual(join.browserPublicKeyJwk);
 
-    const brokerPort = new URL(broker.baseUrl).port;
     stopBroker(broker.containerId);
     const restartedAfterMessageBroker = await startBroker(broker.dataDir, brokerPort);
 
     await sendMintSuccess({
       baseUrl: restartedAfterMessageBroker.baseUrl,
-      channelId: created.channelId,
-      minterToken: created.minterToken,
+      channelId,
+      minterToken: join.minterToken,
       minterPrivateKey: minterKeyPair.privateKey,
       minterPublicKeyJwk,
       request: plaintext
@@ -422,5 +454,17 @@ describe("mint pairing integration", () => {
       expiresAt: "2030-01-01T00:00:00.000Z",
       relayerBaseUrl: "https://relayer.example"
     });
+  }, 60_000);
+
+  it.each([
+    { name: "no Origin header", fetchImpl: (): typeof fetch => fetch },
+    { name: "an Origin header for another site", fetchImpl: (): typeof fetch => browserFetch("https://impostor.example") }
+  ])("refuses a browser channel with $name", async ({ fetchImpl }) => {
+    const broker = await startBroker();
+    await expect(requestEphemeralSession({
+      brokerBaseUrl: broker.baseUrl,
+      storage: false,
+      fetchImpl: fetchImpl()
+    })).rejects.toThrow("channel create failed: 400");
   }, 30_000);
 });

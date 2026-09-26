@@ -1,4 +1,4 @@
-import { canonicalJson, type JsonValue } from "./canonicalJson.js";
+import { type JsonValue } from "./canonicalJson.js";
 import { PlayError, type PlayErrorCode } from "./errors.js";
 import {
   decryptChannelMessage,
@@ -10,11 +10,7 @@ import {
   type EncryptedChannelMessage,
   type MessageRole
 } from "./crypto.js";
-import { algorithm, pairingToResolved, parsePairingQrPayload, type ResolvedPairing } from "./pairingPayload.js";
-
-export type PairingInput =
-  | { qrPayload: unknown }
-  | { brokerBaseUrl: string; shortCode: string };
+import { algorithm, buildAppLink, defaultAppLinkBaseUrl, type PairingMaterial } from "./pairingPayload.js";
 
 export type BrowserInfo = {
   name?: string;
@@ -54,10 +50,41 @@ export type TokenStorageOptions =
     };
 
 export type RequestEphemeralSessionOptions = {
-  pairing: PairingInput;
+  /** Mint Pairing Broker the site creates its pairing channel on. */
+  brokerBaseUrl: string;
+  /**
+   * Base of the link that brings the visitor's Art Computer to the channel.
+   * Defaults to `https://link.feralfile.com/pair`; the library appends
+   * `?channel=<id>&token=<pairingToken>`.
+   */
+  appLinkBaseUrl?: string;
+  /**
+   * Called with the app link, six-digit code and channel expiry once the
+   * channel exists, and again with fresh material each time an expired channel
+   * is replaced. Show it to the visitor; do not log it.
+   */
+  onPairingMaterial?: (material: PairingMaterial) => void;
+  /** Called once the Art Computer has joined, when approval moves to the app. */
+  onPeerJoined?: () => void;
+  /** Aborting stops pairing with `pairing_canceled` and closes the channel. */
+  signal?: AbortSignal;
+  /**
+   * How many times to replace a channel that expires before an Art Computer
+   * joins it. 0 (the default) throws `pairing_code_expired` on the first
+   * expiry; after the last replacement expires the call throws
+   * `approval_timeout`.
+   */
+  channelRegenerations?: number;
+  /** Idle lifetime of each pairing channel, 15 to 300 seconds (default 300). */
+  idleTtlSeconds?: number;
   browserInfo?: BrowserInfo;
   storage?: TokenStorageOptions;
+  /**
+   * Poll interval. Unset: 1 s backing off to 2 s while waiting for the Art
+   * Computer, 5 s while waiting for approval. Set: used for both.
+   */
   pollIntervalMs?: number;
+  /** How long to wait for approval once the Art Computer has joined. Default 5 minutes. */
   maxWaitMs?: number;
   /**
    * Session lifetime this site asks for, in whole seconds, from 1 to
@@ -75,13 +102,22 @@ type OptionalBrowserGlobals = {
   localStorage?: Storage;
 };
 
-type JoinResponse = {
+type CreateChannelResponse = {
   channelId: string;
   browserToken: string;
-  algorithm: typeof algorithm;
-  minterPublicKeyJwk: JsonWebKey;
+  pairingToken: string;
+  shortCode: string;
   expiresAt: string;
-  nextSeq: number;
+};
+
+/** A channel this browser created; the broker URL is already normalized. */
+type BrowserChannel = CreateChannelResponse & {
+  brokerBaseUrl: string;
+};
+
+type ChannelPeer = {
+  role: "minter";
+  publicKeyJwk: JsonWebKey;
 };
 
 type SendMessageResponse = {
@@ -97,6 +133,7 @@ type BrokerMessage = EncryptedChannelMessage & {
 type PollMessagesResponse = {
   channelId: string;
   expiresAt: string;
+  peer: ChannelPeer | undefined;
   messages: BrokerMessage[];
 };
 
@@ -174,10 +211,6 @@ function requiredJwk(record: Record<string, unknown>, key: string, errorMessage:
   return value;
 }
 
-function publicJwkMatches(left: JsonWebKey, right: JsonWebKey): boolean {
-  return canonicalJson(left as JsonValue) === canonicalJson(right as JsonValue);
-}
-
 async function jsonResponse(
   response: Response,
   errorPrefix: string,
@@ -187,7 +220,13 @@ async function jsonResponse(
   if (!response.ok) {
     throw new PlayError(`${errorPrefix}: ${String(response.status)}`, codeByStatus?.[response.status] ?? defaultCode);
   }
-  return response.json() as Promise<unknown>;
+  try {
+    return await response.json() as unknown;
+  } catch {
+    // Never rethrow the parse error: a SyntaxError quotes the body, which can
+    // carry broker or session tokens.
+    throw new Error(`${errorPrefix}: invalid response`);
+  }
 }
 
 function defaultFetch(): typeof fetch {
@@ -237,39 +276,30 @@ function browserInfoToJsonValue(browserInfo: BrowserInfo): JsonValue {
   };
 }
 
-function parseResolvedPairing(value: unknown, brokerBaseUrl: string, shortCode: string): ResolvedPairing {
-  if (!isRecord(value) || value["algorithm"] !== algorithm) {
-    throw new Error("short-code resolution invalid");
+function parseCreate(value: unknown): CreateChannelResponse {
+  if (!isRecord(value)) {
+    throw new Error("channel create invalid");
   }
-  const resolvedBrokerBaseUrl = optionalString(value, "brokerBaseUrl");
-  const resolvedPairingToken = optionalString(value, "pairingToken");
-  const resolvedShortCode = optionalString(value, "shortCode") ?? shortCode;
-  return {
-    brokerBaseUrl: normalizeBaseUrl(resolvedBrokerBaseUrl ?? brokerBaseUrl),
-    channelId: requiredString(value, "channelId", "short-code resolution invalid"),
-    ...(resolvedPairingToken === undefined ? {} : { pairingToken: resolvedPairingToken }),
-    shortCode: resolvedShortCode,
-    expiresAt: requiredString(value, "expiresAt", "short-code resolution invalid"),
-    algorithm,
-    minterPublicKeyJwk: requiredJwk(value, "minterPublicKeyJwk", "short-code resolution invalid")
-  };
-}
-
-function parseJoin(value: unknown, channelId: string): JoinResponse {
-  if (!isRecord(value) || value["algorithm"] !== algorithm) {
-    throw new Error("channel join invalid");
+  // A broker that predates browser-created channels answers without a
+  // creatorRole (or rejects the request outright); refuse to carry on as if the
+  // channel were ours.
+  if (value["creatorRole"] !== "browser") {
+    throw new Error("channel create invalid");
   }
-  const joinedChannelId = requiredString(value, "channelId", "channel join invalid");
-  if (joinedChannelId !== channelId) {
-    throw new Error("channel join invalid");
+  const shortCode = requiredString(value, "shortCode", "channel create invalid");
+  if (!/^[0-9]{6}$/.test(shortCode)) {
+    throw new Error("channel create invalid");
+  }
+  const expiresAt = requiredString(value, "expiresAt", "channel create invalid");
+  if (!Number.isFinite(Date.parse(expiresAt))) {
+    throw new Error("channel create invalid");
   }
   return {
-    channelId: joinedChannelId,
-    browserToken: requiredString(value, "browserToken", "channel join invalid"),
-    algorithm,
-    minterPublicKeyJwk: requiredJwk(value, "minterPublicKeyJwk", "channel join invalid"),
-    expiresAt: requiredString(value, "expiresAt", "channel join invalid"),
-    nextSeq: requiredNumber(value, "nextSeq", "channel join invalid")
+    channelId: requiredString(value, "channelId", "channel create invalid"),
+    browserToken: requiredString(value, "browserToken", "channel create invalid"),
+    pairingToken: requiredString(value, "pairingToken", "channel create invalid"),
+    shortCode,
+    expiresAt
   };
 }
 
@@ -325,8 +355,19 @@ function parsePoll(value: unknown, channelId: string): PollMessagesResponse {
   return {
     channelId: polledChannelId,
     expiresAt: requiredString(value, "expiresAt", "poll response invalid"),
+    peer: parsePeer(value["peer"]),
     messages: messagesValue.map((message) => parseBrokerMessage(message))
   };
+}
+
+function parsePeer(value: unknown): ChannelPeer | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (!isRecord(value) || value["role"] !== "minter") {
+    throw new Error("poll response invalid");
+  }
+  return { role: "minter", publicKeyJwk: requiredJwk(value, "publicKeyJwk", "poll response invalid") };
 }
 
 function isMessageRole(value: string): value is MessageRole {
@@ -376,8 +417,20 @@ function parseSessionPayload(value: unknown, channelId: string, requestMessageId
   };
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted === true) {
+      resolve();
+      return;
+    }
+    const finish = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    signal?.addEventListener("abort", finish, { once: true });
+  });
 }
 
 function extractOk(value: unknown): boolean | undefined {
@@ -393,79 +446,97 @@ function extractOk(value: unknown): boolean | undefined {
   return undefined;
 }
 
-async function resolvePairing(input: PairingInput, fetcher: typeof fetch): Promise<ResolvedPairing> {
-  if ("qrPayload" in input) {
-    const payload = parsePairingQrPayload(input.qrPayload);
-    return { ...pairingToResolved(payload), brokerBaseUrl: normalizeBaseUrl(payload.brokerBaseUrl) };
-  }
-  const brokerBaseUrl = normalizeBaseUrl(input.brokerBaseUrl);
-  const response = await fetcher(new URL("/v1/pairing-codes/resolve", brokerBaseUrl), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ shortCode: input.shortCode })
-  });
-  return parseResolvedPairing(
-    await jsonResponse(response, "short-code resolution failed", {
-      404: "pairing_code_not_found",
-      410: "pairing_code_expired"
-    }),
-    brokerBaseUrl,
-    input.shortCode
-  );
+function channelUrl(channel: BrowserChannel, suffix = ""): URL {
+  return new URL(`/v1/channels/${encodeURIComponent(channel.channelId)}${suffix}`, channel.brokerBaseUrl);
 }
 
-async function joinChannel(input: {
+async function createChannel(input: {
   fetcher: typeof fetch;
-  pairing: ResolvedPairing;
+  brokerBaseUrl: string;
   browserPublicKeyJwk: JsonWebKey;
   origin: string;
   browserInfo: BrowserInfo;
-}): Promise<JoinResponse> {
-  const body = {
-    ...(input.pairing.pairingToken === undefined ? {} : { pairingToken: input.pairing.pairingToken }),
-    ...(input.pairing.pairingToken === undefined && input.pairing.shortCode !== undefined ? { shortCode: input.pairing.shortCode } : {}),
-    browserPublicKeyJwk: input.browserPublicKeyJwk,
-    origin: input.origin,
-    browserInfo: input.browserInfo
-  };
-  const response = await input.fetcher(new URL(`/v1/channels/${encodeURIComponent(input.pairing.channelId)}/join`, input.pairing.brokerBaseUrl), {
+  idleTtlSeconds: number;
+  signal: AbortSignal | undefined;
+}): Promise<BrowserChannel> {
+  // The browser's own fetch adds the Origin header the broker attests; the body
+  // origin has to match it exactly.
+  const response = await input.fetcher(new URL("/v1/channels", input.brokerBaseUrl), {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(body)
+    body: JSON.stringify({
+      algorithm,
+      creatorRole: "browser",
+      browserPublicKeyJwk: input.browserPublicKeyJwk,
+      origin: input.origin,
+      browserInfo: browserInfoToJsonValue(input.browserInfo),
+      idleTtlSeconds: input.idleTtlSeconds,
+      shortCodeRequested: true
+    }),
+    ...(input.signal === undefined ? {} : { signal: input.signal })
   });
-  return parseJoin(
-    await jsonResponse(response, "channel join failed", { 401: "pairing_code_used" }),
-    input.pairing.channelId
-  );
+  const created = parseCreate(await jsonResponse(response, "channel create failed"));
+  return { ...created, brokerBaseUrl: input.brokerBaseUrl };
+}
+
+/** Thrown internally when the broker reports the channel gone (404) or expired (410). */
+class ChannelGoneError extends Error {
+  constructor() {
+    super("channel expired");
+    this.name = "ChannelGoneError";
+  }
 }
 
 async function sendMintRequest(input: {
   fetcher: typeof fetch;
-  pairing: ResolvedPairing;
-  browserToken: string;
+  channel: BrowserChannel;
   encrypted: EncryptedChannelMessage;
+  signal: AbortSignal | undefined;
 }): Promise<SendMessageResponse> {
-  const response = await input.fetcher(new URL(`/v1/channels/${encodeURIComponent(input.pairing.channelId)}/messages`, input.pairing.brokerBaseUrl), {
+  const response = await input.fetcher(channelUrl(input.channel, "/messages"), {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${input.browserToken}`
+      authorization: `Bearer ${input.channel.browserToken}`
     },
-    body: JSON.stringify(input.encrypted)
+    body: JSON.stringify(input.encrypted),
+    ...(input.signal === undefined ? {} : { signal: input.signal })
   });
-  return parseSend(await jsonResponse(response, "message send failed"), input.pairing.channelId);
+  if (response.status === 404 || response.status === 410) {
+    // The channel expired between the peer joining and the request landing.
+    throw new ChannelGoneError();
+  }
+  return parseSend(await jsonResponse(response, "message send failed"), input.channel.channelId);
 }
 
 async function pollMessages(input: {
   fetcher: typeof fetch;
-  pairing: ResolvedPairing;
-  browserToken: string;
+  channel: BrowserChannel;
   afterSeq: number;
+  signal: AbortSignal | undefined;
 }): Promise<PollMessagesResponse> {
-  const url = new URL(`/v1/channels/${encodeURIComponent(input.pairing.channelId)}/messages`, input.pairing.brokerBaseUrl);
+  const url = channelUrl(input.channel, "/messages");
   url.searchParams.set("afterSeq", String(input.afterSeq));
-  const response = await input.fetcher(url, { headers: { authorization: `Bearer ${input.browserToken}` } });
-  return parsePoll(await jsonResponse(response, "poll failed"), input.pairing.channelId);
+  const response = await input.fetcher(url, {
+    headers: { authorization: `Bearer ${input.channel.browserToken}` },
+    ...(input.signal === undefined ? {} : { signal: input.signal })
+  });
+  if (response.status === 404 || response.status === 410) {
+    throw new ChannelGoneError();
+  }
+  return parsePoll(await jsonResponse(response, "poll failed"), input.channel.channelId);
+}
+
+/** Best-effort close so an abandoned channel stops admitting a device. */
+async function closeChannel(fetcher: typeof fetch, channel: BrowserChannel): Promise<void> {
+  try {
+    await fetcher(channelUrl(channel), {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${channel.browserToken}` }
+    });
+  } catch {
+    // The channel expires on its own; nothing to report.
+  }
 }
 
 export function ephemeralBrowserSessionStorageKey(origin: string): string {
@@ -533,10 +604,241 @@ function parseStoredSession(raw: string, origin: string): EphemeralBrowserSessio
   };
 }
 
+/** Broker bounds for a pairing channel's idle lifetime, in seconds. */
+export const minIdleTtlSeconds = 15;
+export const maxIdleTtlSeconds = 300;
+const defaultIdleTtlSeconds = 300;
+const maxChannelRegenerations = 5;
+const defaultResultPollIntervalMs = 5000;
+const peerPollFastIntervalMs = 1000;
+const peerPollSlowIntervalMs = 2000;
+const peerPollFastCount = 10;
+
+function validateIdleTtlSeconds(value: number | undefined): number {
+  if (value === undefined) {
+    return defaultIdleTtlSeconds;
+  }
+  if (!Number.isSafeInteger(value) || value < minIdleTtlSeconds || value > maxIdleTtlSeconds) {
+    throw new Error(`idleTtlSeconds must be a whole number of seconds from ${String(minIdleTtlSeconds)} to ${String(maxIdleTtlSeconds)}`);
+  }
+  return value;
+}
+
+function validateChannelRegenerations(value: number | undefined): number {
+  if (value === undefined) {
+    return 0;
+  }
+  if (!Number.isSafeInteger(value) || value < 0 || value > maxChannelRegenerations) {
+    throw new Error(`channelRegenerations must be a whole number from 0 to ${String(maxChannelRegenerations)}`);
+  }
+  return value;
+}
+
+/**
+ * Checks `appLinkBaseUrl` up front so a bad option fails before a channel
+ * exists. Returns the value to use (the default when unset).
+ */
+export function validateAppLinkBaseUrl(value: string | undefined): string {
+  const appLinkBaseUrl = value ?? defaultAppLinkBaseUrl;
+  buildAppLink(appLinkBaseUrl, "ch_check", "pt_check");
+  return appLinkBaseUrl;
+}
+
+function canceledError(): PlayError {
+  return new PlayError("pairing canceled", "pairing_canceled");
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) {
+    throw canceledError();
+  }
+}
+
+type PairingContext = {
+  fetcher: typeof fetch;
+  origin: string;
+  browserInfo: BrowserInfo;
+  signal: AbortSignal | undefined;
+  pollIntervalMs: number | undefined;
+};
+
+/**
+ * Waits for the Art Computer to join the channel and returns its public key.
+ * Throws ChannelGoneError when the channel expires first.
+ */
+async function waitForPeer(context: PairingContext, channel: BrowserChannel, localDeadline: number): Promise<ChannelPeer> {
+  let polls = 0;
+  for (;;) {
+    throwIfAborted(context.signal);
+    if (Date.now() >= localDeadline) {
+      throw new ChannelGoneError();
+    }
+    let poll: PollMessagesResponse | undefined;
+    // Bound each poll by the channel deadline too, so a stalled request cannot
+    // hold the dialog on an expired code.
+    const pollController = new AbortController();
+    const onCancel = (): void => {
+      pollController.abort();
+    };
+    context.signal?.addEventListener("abort", onCancel, { once: true });
+    const deadlineTimer = setTimeout(onCancel, Math.max(0, localDeadline - Date.now()));
+    try {
+      poll = await pollMessages({ fetcher: context.fetcher, channel, afterSeq: 0, signal: pollController.signal });
+    } catch (error) {
+      throwIfAborted(context.signal);
+      if (pollController.signal.aborted) {
+        throw new ChannelGoneError();
+      }
+      if (!(error instanceof TypeError)) {
+        throw error;
+      }
+    } finally {
+      clearTimeout(deadlineTimer);
+      context.signal?.removeEventListener("abort", onCancel);
+    }
+    if (poll?.peer !== undefined) {
+      return poll.peer;
+    }
+    polls += 1;
+    const interval = context.pollIntervalMs ?? (polls < peerPollFastCount ? peerPollFastIntervalMs : peerPollSlowIntervalMs);
+    await sleep(interval, context.signal);
+  }
+}
+
+/** Sends the encrypted mint request to the joined Art Computer and waits for its answer. */
+async function completeMint(input: {
+  context: PairingContext;
+  channel: BrowserChannel;
+  peer: ChannelPeer;
+  keyPair: CryptoKeyPair;
+  browserPublicKeyJwk: JsonWebKey;
+  requestedExpiresInSeconds: number | undefined;
+  maxWaitMs: number;
+}): Promise<EphemeralBrowserSession> {
+  const { context, channel, peer, keyPair, browserPublicKeyJwk } = input;
+  const requestMessageId = randomMessageId();
+  const mintRequestPlaintext: JsonValue = {
+    v: 1,
+    type: "mint_request",
+    channelId: channel.channelId,
+    requestMessageId,
+    origin: context.origin,
+    browserInfo: browserInfoToJsonValue(context.browserInfo),
+    // Tells the device this page can hold a session with no expiry. The flag
+    // exists from 0.3.0; earlier clients required a string expiresAt, so the
+    // device may send the owner-kept shape only to a requester that declared
+    // this.
+    supportsPersistentSessions: true,
+    ...(input.requestedExpiresInSeconds === undefined ? {} : { requestedExpiresInSeconds: input.requestedExpiresInSeconds }),
+    browserPublicKeyJwk: browserPublicKeyJwk as unknown as JsonValue,
+    requestedAt: new Date().toISOString()
+  };
+  const encryptedRequest = await encryptChannelMessage({
+    privateKey: keyPair.privateKey,
+    senderPublicJwk: browserPublicKeyJwk,
+    peerPublicJwk: peer.publicKeyJwk,
+    channelId: channel.channelId,
+    messageId: requestMessageId,
+    seq: 0,
+    sender: "browser",
+    recipient: "minter",
+    plaintext: mintRequestPlaintext
+  });
+  // One approval deadline covers the request POST and every result poll, so
+  // a broker request that never resolves still ends in approval_timeout.
+  const deadline = Date.now() + input.maxWaitMs;
+  // A cancel during encryption fired before any listener existed and is not
+  // replayed: check now, so a canceled visitor never reaches device approval.
+  throwIfAborted(context.signal);
+  const approvalController = new AbortController();
+  const abortApproval = (): void => {
+    approvalController.abort();
+  };
+  context.signal?.addEventListener("abort", abortApproval, { once: true });
+  if (context.signal?.aborted === true) {
+    approvalController.abort();
+  }
+  const deadlineTimer = setTimeout(abortApproval, Math.max(0, input.maxWaitMs));
+  const timedOut = (): PlayError => new PlayError("poll timed out", "approval_timeout");
+  try {
+    let sent: SendMessageResponse;
+    try {
+      sent = await sendMintRequest({ fetcher: context.fetcher, channel, encrypted: encryptedRequest, signal: approvalController.signal });
+    } catch (error) {
+      throwIfAborted(context.signal);
+      if (approvalController.signal.aborted) {
+        throw timedOut();
+      }
+      throw error;
+    }
+    let afterSeq = sent.seq;
+    while (Date.now() <= deadline) {
+      throwIfAborted(context.signal);
+      let poll: PollMessagesResponse;
+      try {
+        poll = await pollMessages({ fetcher: context.fetcher, channel, afterSeq, signal: approvalController.signal });
+      } catch (error) {
+        throwIfAborted(context.signal);
+        if (approvalController.signal.aborted) {
+          throw timedOut();
+        }
+        if (error instanceof TypeError) {
+          await sleep(context.pollIntervalMs ?? defaultResultPollIntervalMs, approvalController.signal);
+          continue;
+        }
+        if (error instanceof ChannelGoneError) {
+          throw timedOut();
+        }
+        throw error;
+      }
+      for (const message of poll.messages) {
+        afterSeq = Math.max(afterSeq, message.seq);
+        if (message.sender !== "minter" || message.recipient !== "browser") {
+          continue;
+        }
+        const plaintext = await decryptChannelMessage({
+          privateKey: keyPair.privateKey,
+          peerPublicJwk: peer.publicKeyJwk,
+          channelId: channel.channelId,
+          messageId: message.messageId,
+          seq: message.seq,
+          sender: message.sender,
+          recipient: message.recipient,
+          algorithm: message.algorithm,
+          aad: message.aad,
+          nonce: message.nonce,
+          ciphertext: message.ciphertext
+        });
+        return parseSessionPayload(plaintext, channel.channelId, requestMessageId);
+      }
+      await sleep(context.pollIntervalMs ?? defaultResultPollIntervalMs, approvalController.signal);
+    }
+    throwIfAborted(context.signal);
+    throw timedOut();
+  } finally {
+    clearTimeout(deadlineTimer);
+    context.signal?.removeEventListener("abort", abortApproval);
+  }
+}
+
+/**
+ * Pairs this browser with the visitor's Art Computer and returns a browser
+ * session, or the stored one for this origin when it is still valid.
+ *
+ * The site creates a pairing channel on the broker and hands the visitor the
+ * way in through `onPairingMaterial`: an app link (tap on a phone, QR on a
+ * desktop) and a six-digit code. The Feral File app brings the Art Computer to
+ * the channel, the owner approves in the app, and the session comes back
+ * end-to-end encrypted.
+ */
 export async function requestEphemeralSession(options: RequestEphemeralSessionOptions): Promise<EphemeralBrowserSession> {
   const fetcher = options.fetchImpl ?? defaultFetch();
   const origin = currentOrigin();
   const requestedExpiresInSeconds = validateRequestedExpiresInSeconds(options.requestedExpiresInSeconds);
+  const idleTtlSeconds = validateIdleTtlSeconds(options.idleTtlSeconds);
+  const channelRegenerations = validateChannelRegenerations(options.channelRegenerations);
+  const appLinkBaseUrl = validateAppLinkBaseUrl(options.appLinkBaseUrl);
+  const brokerBaseUrl = normalizeBaseUrl(options.brokerBaseUrl);
   const browserInfo = { ...defaultBrowserInfo(), ...options.browserInfo };
   const storage = resolveStorage(options.storage);
   const existingSession = storage === undefined ? undefined : readStoredEphemeralBrowserSession(storage, origin);
@@ -544,83 +846,63 @@ export async function requestEphemeralSession(options: RequestEphemeralSessionOp
     return existingSession;
   }
 
-  const pairing = await resolvePairing(options.pairing, fetcher);
-  const keyPair = await generateBrowserKeyPair();
-  const browserPublicKeyJwk = await exportPublicJwk(keyPair.publicKey);
-  const join = await joinChannel({ fetcher, pairing, browserPublicKeyJwk, origin, browserInfo });
-  if (!publicJwkMatches(join.minterPublicKeyJwk, pairing.minterPublicKeyJwk)) {
-    throw new Error("channel join minter key mismatch");
-  }
-
-  const requestMessageId = randomMessageId();
-  const mintRequestPlaintext: JsonValue = {
-    v: 1,
-    type: "mint_request",
-    channelId: pairing.channelId,
-    requestMessageId,
-    origin,
-    browserInfo: browserInfoToJsonValue(browserInfo),
-    // Tells the device this page can hold a session with no expiry. The flag
-    // exists from 0.3.0; earlier clients required a string expiresAt, so the
-    // device may send the owner-kept shape only to a requester that declared
-    // this.
-    supportsPersistentSessions: true,
-    ...(requestedExpiresInSeconds === undefined ? {} : { requestedExpiresInSeconds }),
-    browserPublicKeyJwk: browserPublicKeyJwk as unknown as JsonValue,
-    requestedAt: new Date().toISOString()
-  };
-  const encryptedRequest = await encryptChannelMessage({
-    privateKey: keyPair.privateKey,
-    senderPublicJwk: browserPublicKeyJwk,
-    peerPublicJwk: join.minterPublicKeyJwk,
-    channelId: pairing.channelId,
-    messageId: requestMessageId,
-    seq: 0,
-    sender: "browser",
-    recipient: "minter",
-    plaintext: mintRequestPlaintext
-  });
-  const sent = await sendMintRequest({ fetcher, pairing, browserToken: join.browserToken, encrypted: encryptedRequest });
-  const deadline = Date.now() + (options.maxWaitMs ?? 300_000);
-  let afterSeq = Math.max(join.nextSeq, sent.seq);
-  while (Date.now() <= deadline) {
-    let poll: PollMessagesResponse;
+  const signal = options.signal;
+  const context: PairingContext = { fetcher, origin, browserInfo, signal, pollIntervalMs: options.pollIntervalMs };
+  for (let attempt = 0; ; attempt += 1) {
+    throwIfAborted(signal);
+    // A fresh key pair per channel: a replaced channel shares nothing with the
+    // one it replaces.
+    const keyPair = await generateBrowserKeyPair();
+    const browserPublicKeyJwk = await exportPublicJwk(keyPair.publicKey);
+    let channel: BrowserChannel;
     try {
-      poll = await pollMessages({ fetcher, pairing, browserToken: join.browserToken, afterSeq });
+      channel = await createChannel({ fetcher, brokerBaseUrl, browserPublicKeyJwk, origin, browserInfo, idleTtlSeconds, signal });
     } catch (error) {
-      if (error instanceof TypeError) {
-        await sleep(options.pollIntervalMs ?? 5000);
-        continue;
-      }
-      throw error;
+      throw signal?.aborted === true ? canceledError() : error;
     }
-    for (const message of poll.messages) {
-      afterSeq = Math.max(afterSeq, message.seq);
-      if (message.sender !== "minter" || message.recipient !== "browser") {
-        continue;
-      }
-      const plaintext = await decryptChannelMessage({
-        privateKey: keyPair.privateKey,
-        peerPublicJwk: join.minterPublicKeyJwk,
-        channelId: pairing.channelId,
-        messageId: message.messageId,
-        seq: message.seq,
-        sender: message.sender,
-        recipient: message.recipient,
-        algorithm: message.algorithm,
-        aad: message.aad,
-        nonce: message.nonce,
-        ciphertext: message.ciphertext
+    // Start the channel's clock once it exists, so a slow create does not eat
+    // its lifetime.
+    const localDeadline = Date.now() + idleTtlSeconds * 1000;
+    try {
+      options.onPairingMaterial?.({
+        appLink: buildAppLink(appLinkBaseUrl, channel.channelId, channel.pairingToken),
+        shortCode: channel.shortCode,
+        expiresAt: channel.expiresAt
       });
-      const session = parseSessionPayload(plaintext, pairing.channelId, requestMessageId);
+      const peer = await waitForPeer(context, channel, localDeadline);
+      options.onPeerJoined?.();
+      const session = await completeMint({
+        context,
+        channel,
+        peer,
+        keyPair,
+        browserPublicKeyJwk,
+        requestedExpiresInSeconds,
+        maxWaitMs: options.maxWaitMs ?? 300_000
+      });
+      // A cancel that lands while the result is decrypted still wins.
+      throwIfAborted(signal);
       if (storage !== undefined) {
         storeEphemeralBrowserSession(storage, origin, session);
       }
       return session;
+    } catch (error) {
+      // Fire and forget: a slow DELETE must not hold up cancel or regeneration.
+      void closeChannel(fetcher, channel);
+      if (signal?.aborted === true) {
+        throw canceledError();
+      }
+      if (error instanceof ChannelGoneError) {
+        if (attempt < channelRegenerations) {
+          continue;
+        }
+        throw channelRegenerations === 0
+          ? new PlayError("pairing code expired", "pairing_code_expired")
+          : new PlayError("pairing timed out", "approval_timeout");
+      }
+      throw error;
     }
-    await sleep(options.pollIntervalMs ?? 5000);
   }
-  throw new PlayError("poll timed out", "approval_timeout");
 }
 
 export async function displayDp1Playlist(options: DisplayDp1PlaylistOptions): Promise<void> {

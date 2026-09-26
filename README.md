@@ -8,18 +8,23 @@ their Feral File Art Computer (FF1).
 [Integration Guide](docs/integration.md).
 
 Three components make the flow work. A website embeds the
-[`@feralfile/play`](clients/session-recipient/js) browser library. The library
-pairs the visitor's browser with their FF1 through the **Mint Pairing Broker**
-in [server/](server), a short-lived opaque transport for QR/code-based pairing
-and end-to-end encrypted mint request/response messages. On the device,
-`feral-controld` embeds the [Go ephemeral token minter](clients/ephemeral-token-minter/go)
-to answer those requests, asks the user for approval through the Feral File
-mobile app via `ff-relayer`, and mints a revokable browser session scoped to
-the display path. The full flow is documented in
+[`@feralfile/play`](clients/session-recipient/js) browser library. On a play
+with no stored session, the library creates a pairing channel on the **Mint
+Pairing Broker** in [server/](server), a short-lived opaque transport for
+end-to-end encrypted mint request/response messages, and shows the visitor an
+app link (a button on a phone, a QR on a desktop) and a six-digit code. The
+Feral File mobile app brings the visitor's FF1 to that channel. On the device,
+`feral-controld` embeds the [Go ephemeral token minter](clients/ephemeral-token-minter/go),
+which joins the channel and carries the site's encrypted request and the
+result; `feral-controld` asks the owner for approval in the Feral File mobile
+app via `ff-relayer` and mints a revokable browser session scoped to the
+display path. The full flow is documented in
 [docs/sequential-flow.md](docs/sequential-flow.md).
 
-The pairing flow, the hosted broker at `https://handoff.feralfile.com`, the
-mobile-app approval, and the FF1 display path work end to end today. The
+The hosted broker at `https://handoff.feralfile.com`, the mobile-app approval,
+and the FF1 display path work end to end today. `@feralfile/play` 0.4.0 starts
+pairing from the site; 0.3.x paired from the device, and the broker keeps
+serving that path for sites that have not upgraded. The
 integration surface is pre-1.0: expect additive change, and open issues freely
 — integration feedback is exactly what this stage is for.
 

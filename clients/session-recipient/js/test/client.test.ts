@@ -7,17 +7,28 @@ import {
   requestEphemeralSession,
   storeEphemeralBrowserSession,
   type EphemeralBrowserSession,
+  type RequestEphemeralSessionOptions,
   type TokenStorage
 } from "../src/client.js";
-import { decryptChannelMessage, encryptChannelMessage, exportPublicJwk, generateBrowserKeyPair } from "../src/crypto.js";
-import type { JsonValue } from "../src/canonicalJson.js";
-
-type RequestRecord = {
-  url: string;
-  init: RequestInit | undefined;
-};
+import { base64UrlDecode, decryptChannelMessage, generateBrowserKeyPair } from "../src/crypto.js";
+import {
+  authorizationHeader,
+  brokerBaseUrl,
+  captureError,
+  expectNoSecrets,
+  fakeBroker,
+  jsonResponse,
+  memoryStorage,
+  requestBody,
+  requestUrl,
+  type FakeBrokerOptions,
+  type ResultKind
+} from "./fakeBroker.js";
+import { PlayError } from "../src/errors.js";
+import type { PairingMaterial } from "../src/pairingPayload.js";
 
 const testOrigin = "https://nft.example";
+const algorithmName = "P256-HKDF-SHA256-AES-256-GCM";
 let previousLocationDescriptor: PropertyDescriptor | undefined;
 let previousFetchDescriptor: PropertyDescriptor | undefined;
 
@@ -31,6 +42,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   if (previousLocationDescriptor === undefined) {
     Reflect.deleteProperty(globalThis, "location");
   } else {
@@ -43,195 +55,28 @@ afterEach(() => {
   }
 });
 
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
-}
-
-function requestBody(init: RequestInit | undefined): Record<string, unknown> {
-  if (typeof init?.body !== "string") {
-    throw new Error("expected string request body");
-  }
-  return JSON.parse(init.body) as Record<string, unknown>;
-}
-
-function requestUrl(input: Parameters<typeof fetch>[0]): string {
-  if (typeof input === "string") {
-    return input;
-  }
-  if (input instanceof URL) {
-    return input.toString();
-  }
-  return input.url;
-}
-
-function authorizationHeader(init: RequestInit | undefined): string | null {
-  const headers = new Headers(init?.headers);
-  return headers.get("authorization");
-}
-
-function memoryStorage(): TokenStorage & { entries: Map<string, string> } {
-  const entries = new Map<string, string>();
+function baseOptions(fetchImpl: typeof fetch, overrides: Partial<RequestEphemeralSessionOptions> = {}): RequestEphemeralSessionOptions {
   return {
-    entries,
-    getItem: (key) => entries.get(key) ?? null,
-    setItem: (key, value) => {
-      entries.set(key, value);
-    },
-    removeItem: (key) => {
-      entries.delete(key);
-    }
+    brokerBaseUrl,
+    storage: false,
+    pollIntervalMs: 1,
+    fetchImpl,
+    ...overrides
   };
-}
-
-async function createSuccessMessage(input: {
-  minterPrivateKey: CryptoKey;
-  browserPublicKeyJwk: JsonWebKey;
-  requestMessageId?: string;
-  token?: string;
-  sessionId?: string;
-  expiresAt?: string | null;
-  persistent?: boolean;
-}): Promise<ReturnType<typeof jsonResponse>> {
-  const session: Record<string, JsonValue> = {
-    token: input.token ?? "browser-session-token",
-    sessionId: input.sessionId ?? "sess_123",
-    relayerBaseUrl: "https://relayer.example"
-  };
-  if (input.persistent === true) {
-    session["persistent"] = true;
-  }
-  if (input.expiresAt !== undefined) {
-    session["expiresAt"] = input.expiresAt;
-  } else if (input.persistent !== true) {
-    session["expiresAt"] = "2030-01-01T00:00:00.000Z";
-  }
-  const encrypted = await encryptChannelMessage({
-    privateKey: input.minterPrivateKey,
-    peerPublicJwk: input.browserPublicKeyJwk,
-    channelId: "ch_123",
-    messageId: "msg_result",
-    seq: 2,
-    sender: "minter",
-    recipient: "browser",
-    plaintext: {
-      v: 1,
-      type: "mint_succeeded",
-      channelId: "ch_123",
-      ...(input.requestMessageId === undefined ? {} : { requestMessageId: input.requestMessageId }),
-      session
-    }
-  });
-  return jsonResponse({
-    channelId: "ch_123",
-    expiresAt: "2030-01-01T00:00:00.000Z",
-    messages: [{ seq: 2, ...encrypted }]
-  });
-}
-
-async function createRejectionMessage(input: {
-  minterPrivateKey: CryptoKey;
-  browserPublicKeyJwk: JsonWebKey;
-  requestMessageId?: string;
-}): Promise<ReturnType<typeof jsonResponse>> {
-  const encrypted = await encryptChannelMessage({
-    privateKey: input.minterPrivateKey,
-    peerPublicJwk: input.browserPublicKeyJwk,
-    channelId: "ch_123",
-    messageId: "msg_result",
-    seq: 2,
-    sender: "minter",
-    recipient: "browser",
-    plaintext: {
-      v: 1,
-      type: "mint_rejected",
-      channelId: "ch_123",
-      ...(input.requestMessageId === undefined ? {} : { requestMessageId: input.requestMessageId }),
-      reason: "denied"
-    }
-  });
-  return jsonResponse({
-    channelId: "ch_123",
-    expiresAt: "2030-01-01T00:00:00.000Z",
-    messages: [{ seq: 2, ...encrypted }]
-  });
-}
-
-async function decryptMintRequest(minterPrivateKey: CryptoKey, body: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const plaintext = await decryptChannelMessage({
-    privateKey: minterPrivateKey,
-    peerPublicJwk: body["senderPublicKeyJwk"] as JsonWebKey,
-    channelId: "ch_123",
-    messageId: body["messageId"] as string,
-    seq: 0,
-    sender: "browser",
-    recipient: "minter",
-    algorithm: body["algorithm"] as string,
-    aad: body["aad"] as string,
-    nonce: body["nonce"] as string,
-    ciphertext: body["ciphertext"] as string
-  });
-  return plaintext as Record<string, unknown>;
 }
 
 /** Runs the happy-path mint flow and returns the session plus the decrypted mint request. */
 async function runMintFlow(input: {
   requestedExpiresInSeconds?: number;
-  session?: { persistent?: boolean; expiresAt?: string | null };
+  result?: ResultKind;
   storage?: TokenStorage;
 } = {}): Promise<{ session: EphemeralBrowserSession; mintRequest: Record<string, unknown> }> {
-  const minterKeyPair = await generateBrowserKeyPair();
-  const minterPublicKeyJwk = await exportPublicJwk(minterKeyPair.publicKey);
-  let browserPublicKeyJwk: JsonWebKey | undefined;
-  let requestMessageId = "";
-  let mintRequest: Record<string, unknown> | undefined;
-  const fetchImpl = vi.fn<typeof fetch>(async (requestInput, init) => {
-    const url = requestUrl(requestInput);
-    if (url.endsWith("/v1/channels/ch_123/join")) {
-      browserPublicKeyJwk = requestBody(init)["browserPublicKeyJwk"] as JsonWebKey;
-      return jsonResponse({
-        channelId: "ch_123",
-        browserToken: "bt_123",
-        algorithm: "P256-HKDF-SHA256-AES-256-GCM",
-        minterPublicKeyJwk,
-        expiresAt: "2030-01-01T00:00:00.000Z",
-        nextSeq: 1
-      });
-    }
-    if (url.endsWith("/v1/channels/ch_123/messages") && init?.method === "POST") {
-      const body = requestBody(init);
-      requestMessageId = body["messageId"] as string;
-      mintRequest = await decryptMintRequest(minterKeyPair.privateKey, body);
-      return jsonResponse({ channelId: "ch_123", seq: 1, expiresAt: "2030-01-01T00:00:00.000Z" });
-    }
-    if (url.includes("/v1/channels/ch_123/messages?")) {
-      return createSuccessMessage({
-        minterPrivateKey: minterKeyPair.privateKey,
-        browserPublicKeyJwk: browserPublicKeyJwk ?? {},
-        requestMessageId,
-        ...(input.session?.persistent === undefined ? {} : { persistent: input.session.persistent }),
-        ...(input.session?.expiresAt === undefined ? {} : { expiresAt: input.session.expiresAt })
-      });
-    }
-    throw new Error(`unexpected request ${url}`);
-  });
-  const session = await requestEphemeralSession({
-    pairing: {
-      qrPayload: {
-        v: 1,
-        type: "ff-mint-pairing",
-        brokerBaseUrl: "https://pairing.example",
-        channelId: "ch_123",
-        pairingToken: "pt_123",
-        expiresAt: "2030-01-01T00:00:00.000Z",
-        algorithm: "P256-HKDF-SHA256-AES-256-GCM",
-        minterPublicKeyJwk
-      }
-    },
+  const broker = await fakeBroker(input.result === undefined ? {} : { result: input.result });
+  const session = await requestEphemeralSession(baseOptions(broker.fetchImpl, {
     storage: input.storage === undefined ? false : { storage: input.storage },
-    pollIntervalMs: 1,
-    ...(input.requestedExpiresInSeconds === undefined ? {} : { requestedExpiresInSeconds: input.requestedExpiresInSeconds }),
-    fetchImpl
-  });
+    ...(input.requestedExpiresInSeconds === undefined ? {} : { requestedExpiresInSeconds: input.requestedExpiresInSeconds })
+  }));
+  const mintRequest = broker.mintRequests[0]?.plaintext;
   if (mintRequest === undefined) {
     throw new Error("mint request was never sent");
   }
@@ -240,199 +85,283 @@ async function runMintFlow(input: {
 
 describe("requestEphemeralSession", () => {
   it("calls the default global fetch with the global receiver", async () => {
-    const minterKeyPair = await generateBrowserKeyPair();
-    const minterPublicKeyJwk = await exportPublicJwk(minterKeyPair.publicKey);
-    let browserPublicKeyJwk: JsonWebKey | undefined;
-    let requestMessageId = "";
-    const fetchImpl = vi.fn(async function (this: typeof globalThis, input: Parameters<typeof fetch>[0], init?: RequestInit) {
+    const broker = await fakeBroker();
+    const receiverCheckedFetch = vi.fn(function (this: typeof globalThis, input: Parameters<typeof fetch>[0], init?: RequestInit) {
       expect(this).toBe(globalThis);
-      const url = requestUrl(input);
-      if (url.endsWith("/v1/channels/ch_123/join")) {
-        browserPublicKeyJwk = requestBody(init)["browserPublicKeyJwk"] as JsonWebKey;
-        return jsonResponse({
-          channelId: "ch_123",
-          browserToken: "bt_123",
-          algorithm: "P256-HKDF-SHA256-AES-256-GCM",
-          minterPublicKeyJwk,
-          expiresAt: "2030-01-01T00:00:00.000Z",
-          nextSeq: 1
-        });
-      }
-      if (url.endsWith("/v1/channels/ch_123/messages") && init?.method === "POST") {
-        requestMessageId = requestBody(init)["messageId"] as string;
-        return jsonResponse({ channelId: "ch_123", seq: 1, expiresAt: "2030-01-01T00:00:00.000Z" });
-      }
-      if (url.includes("/v1/channels/ch_123/messages?")) {
-        expect(browserPublicKeyJwk).toBeDefined();
-        return createSuccessMessage({
-          minterPrivateKey: minterKeyPair.privateKey,
-          browserPublicKeyJwk: browserPublicKeyJwk ?? {},
-          requestMessageId
-        });
-      }
-      throw new Error(`unexpected request ${url}`);
+      return broker.fetchImpl(input, init);
     });
     Object.defineProperty(globalThis, "fetch", {
       configurable: true,
-      value: fetchImpl
+      value: receiverCheckedFetch
     });
 
-    const session = await requestEphemeralSession({
-      pairing: {
-        qrPayload: {
-          v: 1,
-          type: "ff-mint-pairing",
-          brokerBaseUrl: "https://pairing.example",
-          channelId: "ch_123",
-          pairingToken: "pt_123",
-          expiresAt: "2030-01-01T00:00:00.000Z",
-          algorithm: "P256-HKDF-SHA256-AES-256-GCM",
-          minterPublicKeyJwk
-        }
-      },
-      storage: false,
-      pollIntervalMs: 1
-    });
+    const session = await requestEphemeralSession({ brokerBaseUrl, storage: false, pollIntervalMs: 1 });
 
     expect(session.sessionId).toBe("sess_123");
-    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(receiverCheckedFetch).toHaveBeenCalledTimes(5);
   });
 
-  it("joins from a QR payload, polls, returns a token result, and stores by origin", async () => {
-    const minterKeyPair = await generateBrowserKeyPair();
-    const minterPublicKeyJwk = await exportPublicJwk(minterKeyPair.publicKey);
-    const requests: RequestRecord[] = [];
-    let browserPublicKeyJwk: JsonWebKey | undefined;
-    let requestMessageId = "";
-    let pollCount = 0;
-    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
-      const url = requestUrl(input);
-      requests.push({ url, init });
-      if (url.endsWith("/v1/channels/ch_123/join")) {
-        const body = requestBody(init);
-        expect(body["origin"]).toBe(testOrigin);
-        expect(body["pairingToken"]).toBe("pt_123");
-        browserPublicKeyJwk = body["browserPublicKeyJwk"] as JsonWebKey;
-        return jsonResponse({
-          channelId: "ch_123",
-          browserToken: "bt_123",
-          algorithm: "P256-HKDF-SHA256-AES-256-GCM",
-          minterPublicKeyJwk,
-          expiresAt: "2030-01-01T00:00:00.000Z",
-          nextSeq: 1
-        });
-      }
-      if (url.endsWith("/v1/channels/ch_123/messages") && init?.method === "POST") {
-        const body = requestBody(init);
-        expect(body["sender"]).toBe("browser");
-        expect(body["recipient"]).toBe("minter");
-        expect(init.headers).toEqual(expect.objectContaining({ authorization: "Bearer bt_123" }));
-        requestMessageId = body["messageId"] as string;
-        return jsonResponse({ channelId: "ch_123", seq: 1, expiresAt: "2030-01-01T00:00:00.000Z" });
-      }
-      if (url.includes("/v1/channels/ch_123/messages?")) {
-        pollCount += 1;
-        if (pollCount === 1) {
-          return jsonResponse({ channelId: "ch_123", expiresAt: "2030-01-01T00:00:00.000Z", messages: [] });
-        }
-        expect(browserPublicKeyJwk).toBeDefined();
-        return createSuccessMessage({
-          minterPrivateKey: minterKeyPair.privateKey,
-          browserPublicKeyJwk: browserPublicKeyJwk ?? {},
-          requestMessageId
-        });
-      }
-      throw new Error(`unexpected request ${url}`);
-    });
+  it("creates a browser channel, hands out pairing material, waits for the peer, and stores the session by origin", async () => {
+    const broker = await fakeBroker({ waitingPolls: 2 });
     const storage = memoryStorage();
-    const session = await requestEphemeralSession({
-      pairing: {
-        qrPayload: {
-          v: 1,
-          type: "ff-mint-pairing",
-          brokerBaseUrl: "https://pairing.example",
-          channelId: "ch_123",
-          pairingToken: "pt_123",
-          expiresAt: "2030-01-01T00:00:00.000Z",
-          algorithm: "P256-HKDF-SHA256-AES-256-GCM",
-          minterPublicKeyJwk
-        }
-      },
-      browserInfo: { name: "Test Browser" },
+    const materials: PairingMaterial[] = [];
+    const onPeerJoined = vi.fn();
+
+    const session = await requestEphemeralSession(baseOptions(broker.fetchImpl, {
+      browserInfo: { name: "Test Browser", label: "Test Gallery" },
       storage: { storage },
-      pollIntervalMs: 1,
-      fetchImpl
-    });
+      onPairingMaterial: (material) => {
+        expect(onPeerJoined).not.toHaveBeenCalled();
+        materials.push(material);
+      },
+      onPeerJoined
+    }));
+
     expect(session).toEqual({
-      token: "browser-session-token",
+      token: "browser-session-token-secret",
       sessionId: "sess_123",
       expiresAt: "2030-01-01T00:00:00.000Z",
       relayerBaseUrl: "https://relayer.example"
     });
-    expect(storage.entries.has(ephemeralBrowserSessionStorageKey("https://nft.example"))).toBe(true);
-    expect(requests.map((request) => request.url)).toEqual([
-      "https://pairing.example/v1/channels/ch_123/join",
-      "https://pairing.example/v1/channels/ch_123/messages",
-      "https://pairing.example/v1/channels/ch_123/messages?afterSeq=1",
-      "https://pairing.example/v1/channels/ch_123/messages?afterSeq=1"
+    expect(storage.entries.has(ephemeralBrowserSessionStorageKey(testOrigin))).toBe(true);
+    expect(materials).toEqual([{
+      appLink: "https://link.feralfile.com/pair?channel=ch_1&token=pt_secret_1",
+      shortCode: "123451",
+      expiresAt: "2030-01-01T00:00:00.000Z"
+    }]);
+    expect(onPeerJoined).toHaveBeenCalledTimes(1);
+
+    const createBody = broker.channels[0]?.createBody;
+    expect(createBody).toEqual({
+      algorithm: algorithmName,
+      creatorRole: "browser",
+      browserPublicKeyJwk: expect.objectContaining({ kty: "EC", crv: "P-256" }) as unknown,
+      origin: testOrigin,
+      browserInfo: expect.objectContaining({ name: "Test Browser", label: "Test Gallery" }) as unknown,
+      idleTtlSeconds: 300,
+      shortCodeRequested: true
+    });
+    expect(createBody).not.toHaveProperty("minterPublicKeyJwk");
+    expect(broker.requests.map((request) => `${request.init?.method ?? "GET"} ${request.url}`)).toEqual([
+      "POST https://pairing.example/v1/channels",
+      "GET https://pairing.example/v1/channels/ch_1/messages?afterSeq=0",
+      "GET https://pairing.example/v1/channels/ch_1/messages?afterSeq=0",
+      "GET https://pairing.example/v1/channels/ch_1/messages?afterSeq=0",
+      "POST https://pairing.example/v1/channels/ch_1/messages",
+      "GET https://pairing.example/v1/channels/ch_1/messages?afterSeq=1"
     ]);
+    expect(broker.closed).toEqual([]);
+  });
+
+  it("encrypts the mint request to the joined peer with the channel-bound AAD and the browser key it created the channel with", async () => {
+    const broker = await fakeBroker();
+    await requestEphemeralSession(baseOptions(broker.fetchImpl, { requestedExpiresInSeconds: 600 }));
+
+    const sent = broker.mintRequests[0];
+    if (sent === undefined) {
+      throw new Error("mint request was never sent");
+    }
+    const createdKey = broker.channels[0]?.createBody["browserPublicKeyJwk"];
+    expect(sent.envelope["sender"]).toBe("browser");
+    expect(sent.envelope["recipient"]).toBe("minter");
+    expect(sent.envelope["algorithm"]).toBe(algorithmName);
+    expect(sent.envelope["senderPublicKeyJwk"]).toEqual(createdKey);
+    const aad = JSON.parse(new TextDecoder().decode(base64UrlDecode(sent.envelope["aad"] as string))) as unknown;
+    expect(aad).toEqual({
+      v: 1,
+      channelId: "ch_1",
+      messageId: sent.envelope["messageId"],
+      seq: 0,
+      sender: "browser",
+      recipient: "minter",
+      algorithm: algorithmName
+    });
+    expect(sent.plaintext).toEqual({
+      v: 1,
+      type: "mint_request",
+      channelId: "ch_1",
+      requestMessageId: sent.envelope["messageId"],
+      origin: testOrigin,
+      browserInfo: expect.any(Object) as unknown,
+      supportsPersistentSessions: true,
+      requestedExpiresInSeconds: 600,
+      browserPublicKeyJwk: createdKey,
+      requestedAt: expect.any(String) as unknown
+    });
+
+    // Only the minter key the broker reported as the peer can open it.
+    const otherKeyPair = await generateBrowserKeyPair();
+    await expect(decryptChannelMessage({
+      privateKey: otherKeyPair.privateKey,
+      peerPublicJwk: createdKey as JsonWebKey,
+      channelId: "ch_1",
+      messageId: sent.envelope["messageId"] as string,
+      seq: 1,
+      sender: "browser",
+      recipient: "minter",
+      algorithm: algorithmName,
+      aad: sent.envelope["aad"] as string,
+      nonce: sent.envelope["nonce"] as string,
+      ciphertext: sent.envelope["ciphertext"] as string
+    })).rejects.toThrow();
+  });
+
+  it("builds the app link from a configured appLinkBaseUrl", async () => {
+    const broker = await fakeBroker();
+    const materials: PairingMaterial[] = [];
+    await requestEphemeralSession(baseOptions(broker.fetchImpl, {
+      appLinkBaseUrl: "feralfile://pair",
+      onPairingMaterial: (material) => materials.push(material)
+    }));
+    expect(materials[0]?.appLink).toBe("feralfile://pair?channel=ch_1&token=pt_secret_1");
+  });
+
+  it.each(["javascript:alert(1)", "not a url", "data:text/html,hi"])("rejects appLinkBaseUrl %s before creating a channel", async (appLinkBaseUrl) => {
+    const broker = await fakeBroker();
+    await expect(requestEphemeralSession(baseOptions(broker.fetchImpl, { appLinkBaseUrl }))).rejects.toThrow(/appLinkBaseUrl/);
+    expect(broker.fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([14, 301, 1.5])("rejects idleTtlSeconds %s before creating a channel", async (idleTtlSeconds) => {
+    const broker = await fakeBroker();
+    await expect(requestEphemeralSession(baseOptions(broker.fetchImpl, { idleTtlSeconds }))).rejects.toThrow(/idleTtlSeconds/);
+    expect(broker.fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("keeps polling through a network failure while waiting for the peer", async () => {
+    const broker = await fakeBroker({ networkFailures: 2 });
+    const session = await requestEphemeralSession(baseOptions(broker.fetchImpl));
+    expect(session.sessionId).toBe("sess_123");
+  });
+
+  it("rejects a peer that is not the minter", async () => {
+    const broker = await fakeBroker({ peer: (publicKeyJwk) => ({ role: "browser", publicKeyJwk }) });
+    await expect(requestEphemeralSession(baseOptions(broker.fetchImpl))).rejects.toThrow("poll response invalid");
+    expect(broker.mintRequests).toEqual([]);
+    expect(broker.closed).toEqual(["ch_1"]);
+  });
+
+  it("refuses a broker that did not create a browser channel", async () => {
+    const broker = await fakeBroker({
+      createResponse: () => jsonResponse({
+        channelId: "ch_1",
+        minterToken: "mt_secret",
+        pairingToken: "pt_secret_1",
+        shortCode: "123451",
+        expiresAt: "2030-01-01T00:00:00.000Z"
+      }, 201)
+    });
+    const error = await captureError(requestEphemeralSession(baseOptions(broker.fetchImpl)));
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("channel create invalid");
+    expectNoSecrets(error);
+  });
+
+  it("reports a failed channel create by status only", async () => {
+    const broker = await fakeBroker({ createResponse: () => jsonResponse({ error: "rate_limited" }, 429) });
+    const error = await captureError(requestEphemeralSession(baseOptions(broker.fetchImpl)));
+    expect((error as Error).message).toBe("channel create failed: 429");
+    expectNoSecrets(error);
+  });
+
+  it("throws pairing_code_expired and closes the channel when it expires before a peer joins", async () => {
+    const broker = await fakeBroker({ expiredChannels: 1 });
+    const materials: PairingMaterial[] = [];
+    const error = await captureError(requestEphemeralSession(baseOptions(broker.fetchImpl, {
+      onPairingMaterial: (material) => materials.push(material)
+    })));
+    expect(error).toBeInstanceOf(PlayError);
+    expect((error as PlayError).code).toBe("pairing_code_expired");
+    expectNoSecrets(error);
+    expect(materials).toHaveLength(1);
+    expect(broker.closed).toEqual(["ch_1"]);
+  });
+
+  it("expires a channel on the local clock when the broker keeps answering", async () => {
+    const broker = await fakeBroker({ waitingPolls: Number.MAX_SAFE_INTEGER });
+    const realNow = Date.now.bind(Date);
+    let skewMs = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + skewMs);
+    const error = await captureError(requestEphemeralSession(baseOptions(broker.fetchImpl, {
+      idleTtlSeconds: 15,
+      onPairingMaterial: () => {
+        skewMs = 16_000;
+      }
+    })));
+    expect((error as PlayError).code).toBe("pairing_code_expired");
+    expect(broker.closed).toEqual(["ch_1"]);
+  });
+
+  it("replaces an expired channel with a fresh one and fresh pairing material", async () => {
+    const broker = await fakeBroker({ expiredChannels: 1 });
+    const materials: PairingMaterial[] = [];
+    const session = await requestEphemeralSession(baseOptions(broker.fetchImpl, {
+      channelRegenerations: 2,
+      onPairingMaterial: (material) => materials.push(material)
+    }));
+    expect(session.sessionId).toBe("sess_123");
+    expect(materials.map((material) => material.appLink)).toEqual([
+      "https://link.feralfile.com/pair?channel=ch_1&token=pt_secret_1",
+      "https://link.feralfile.com/pair?channel=ch_2&token=pt_secret_2"
+    ]);
+    expect(materials.map((material) => material.shortCode)).toEqual(["123451", "123452"]);
+    expect(broker.closed).toEqual(["ch_1"]);
+    // Each channel gets its own browser key pair.
+    expect(broker.channels[0]?.createBody["browserPublicKeyJwk"]).not.toEqual(broker.channels[1]?.createBody["browserPublicKeyJwk"]);
+    expect(broker.mintRequests.map((request) => request.channelId)).toEqual(["ch_2"]);
+  });
+
+  it("gives up with approval_timeout once the replacement channels also expire", async () => {
+    const broker = await fakeBroker({ expiredChannels: 3 });
+    const materials: PairingMaterial[] = [];
+    const error = await captureError(requestEphemeralSession(baseOptions(broker.fetchImpl, {
+      channelRegenerations: 2,
+      onPairingMaterial: (material) => materials.push(material)
+    })));
+    expect((error as PlayError).code).toBe("approval_timeout");
+    expectNoSecrets(error);
+    expect(materials).toHaveLength(3);
+    expect(broker.closed).toEqual(["ch_1", "ch_2", "ch_3"]);
+  });
+
+  it.each([-1, 6, 0.5])("rejects channelRegenerations %s", async (channelRegenerations) => {
+    const broker = await fakeBroker();
+    await expect(requestEphemeralSession(baseOptions(broker.fetchImpl, { channelRegenerations }))).rejects.toThrow(/channelRegenerations/);
+  });
+
+  it("stops with pairing_canceled and closes the channel when aborted while waiting", async () => {
+    const broker = await fakeBroker({ waitingPolls: Number.MAX_SAFE_INTEGER });
+    const controller = new AbortController();
+    const error = await captureError(requestEphemeralSession(baseOptions(broker.fetchImpl, {
+      pollIntervalMs: 5,
+      signal: controller.signal,
+      onPairingMaterial: () => {
+        setTimeout(() => {
+          controller.abort();
+        }, 20);
+      }
+    })));
+    expect((error as PlayError).code).toBe("pairing_canceled");
+    expectNoSecrets(error);
+    expect(broker.closed).toEqual(["ch_1"]);
+    expect(broker.mintRequests).toEqual([]);
+  });
+
+  it("maps a declined approval to mint_rejected without storing", async () => {
+    const storage = memoryStorage();
+    const error = await captureError(runMintFlow({ result: { type: "mint_rejected" }, storage }));
+    expect((error as PlayError).code).toBe("mint_rejected");
+    expect(storage.entries.size).toBe(0);
   });
 
   it.each([
-    { type: "mint_succeeded", name: "omits requestMessageId" },
-    { type: "mint_succeeded", name: "uses a mismatched requestMessageId", responseRequestMessageId: "msg_wrong_request" },
-    { type: "mint_rejected", name: "omits requestMessageId" },
-    { type: "mint_rejected", name: "uses a mismatched requestMessageId", responseRequestMessageId: "msg_wrong_request" }
-  ] as const)("rejects a decrypted $type result that $name", async ({ type, responseRequestMessageId }) => {
-    const minterKeyPair = await generateBrowserKeyPair();
-    const minterPublicKeyJwk = await exportPublicJwk(minterKeyPair.publicKey);
-    let browserPublicKeyJwk: JsonWebKey | undefined;
-    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
-      const url = requestUrl(input);
-      if (url.endsWith("/v1/channels/ch_123/join")) {
-        browserPublicKeyJwk = requestBody(init)["browserPublicKeyJwk"] as JsonWebKey;
-        return jsonResponse({
-          channelId: "ch_123",
-          browserToken: "bt_123",
-          algorithm: "P256-HKDF-SHA256-AES-256-GCM",
-          minterPublicKeyJwk,
-          expiresAt: "2030-01-01T00:00:00.000Z",
-          nextSeq: 1
-        });
-      }
-      if (url.endsWith("/v1/channels/ch_123/messages") && init?.method === "POST") {
-        return jsonResponse({ channelId: "ch_123", seq: 1, expiresAt: "2030-01-01T00:00:00.000Z" });
-      }
-      if (url.includes("/v1/channels/ch_123/messages?")) {
-        expect(browserPublicKeyJwk).toBeDefined();
-        const messageInput = {
-          minterPrivateKey: minterKeyPair.privateKey,
-          browserPublicKeyJwk: browserPublicKeyJwk ?? {},
-          ...(responseRequestMessageId === undefined ? {} : { requestMessageId: responseRequestMessageId })
-        };
-        return type === "mint_succeeded" ? createSuccessMessage(messageInput) : createRejectionMessage(messageInput);
-      }
-      throw new Error(`unexpected request ${url}`);
-    });
+    { type: "mint_succeeded", name: "omits requestMessageId", requestMessageId: null },
+    { type: "mint_succeeded", name: "uses a mismatched requestMessageId", requestMessageId: "msg_wrong_request" },
+    { type: "mint_rejected", name: "omits requestMessageId", requestMessageId: null },
+    { type: "mint_rejected", name: "uses a mismatched requestMessageId", requestMessageId: "msg_wrong_request" }
+  ] as const)("rejects a decrypted $type result that $name", async ({ type, requestMessageId }) => {
     const storage = memoryStorage();
-
-    await expect(requestEphemeralSession({
-      pairing: {
-        qrPayload: {
-          v: 1,
-          type: "ff-mint-pairing",
-          brokerBaseUrl: "https://pairing.example",
-          channelId: "ch_123",
-          pairingToken: "pt_123",
-          expiresAt: "2030-01-01T00:00:00.000Z",
-          algorithm: "P256-HKDF-SHA256-AES-256-GCM",
-          minterPublicKeyJwk
-        }
-      },
-      storage: { storage },
-      pollIntervalMs: 1,
-      fetchImpl
-    })).rejects.toThrow("mint result invalid");
+    await expect(runMintFlow({ result: { type, requestMessageId }, storage })).rejects.toThrow("mint result invalid");
     expect(storage.entries.size).toBe(0);
   });
 
@@ -440,152 +369,9 @@ describe("requestEphemeralSession", () => {
     { name: "malformed", expiresAt: "not-a-date" },
     { name: "already expired", expiresAt: "2000-01-01T00:00:00.000Z" }
   ])("rejects a decrypted mint_succeeded result with $name expiresAt without storing", async ({ expiresAt }) => {
-    const minterKeyPair = await generateBrowserKeyPair();
-    const minterPublicKeyJwk = await exportPublicJwk(minterKeyPair.publicKey);
-    let browserPublicKeyJwk: JsonWebKey | undefined;
-    let requestMessageId = "";
-    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
-      const url = requestUrl(input);
-      if (url.endsWith("/v1/channels/ch_123/join")) {
-        browserPublicKeyJwk = requestBody(init)["browserPublicKeyJwk"] as JsonWebKey;
-        return jsonResponse({
-          channelId: "ch_123",
-          browserToken: "bt_123",
-          algorithm: "P256-HKDF-SHA256-AES-256-GCM",
-          minterPublicKeyJwk,
-          expiresAt: "2030-01-01T00:00:00.000Z",
-          nextSeq: 1
-        });
-      }
-      if (url.endsWith("/v1/channels/ch_123/messages") && init?.method === "POST") {
-        requestMessageId = requestBody(init)["messageId"] as string;
-        return jsonResponse({ channelId: "ch_123", seq: 1, expiresAt: "2030-01-01T00:00:00.000Z" });
-      }
-      if (url.includes("/v1/channels/ch_123/messages?")) {
-        expect(browserPublicKeyJwk).toBeDefined();
-        return createSuccessMessage({
-          minterPrivateKey: minterKeyPair.privateKey,
-          browserPublicKeyJwk: browserPublicKeyJwk ?? {},
-          requestMessageId,
-          expiresAt
-        });
-      }
-      throw new Error(`unexpected request ${url}`);
-    });
     const storage = memoryStorage();
-
-    await expect(requestEphemeralSession({
-      pairing: {
-        qrPayload: {
-          v: 1,
-          type: "ff-mint-pairing",
-          brokerBaseUrl: "https://pairing.example",
-          channelId: "ch_123",
-          pairingToken: "pt_123",
-          expiresAt: "2030-01-01T00:00:00.000Z",
-          algorithm: "P256-HKDF-SHA256-AES-256-GCM",
-          minterPublicKeyJwk
-        }
-      },
-      storage: { storage },
-      pollIntervalMs: 1,
-      fetchImpl
-    })).rejects.toThrow("mint result invalid");
+    await expect(runMintFlow({ result: { type: "mint_succeeded", expiresAt }, storage })).rejects.toThrow("mint result invalid");
     expect(storage.entries.size).toBe(0);
-  });
-
-  it("resolves a short code before joining the channel", async () => {
-    const minterKeyPair = await generateBrowserKeyPair();
-    const minterPublicKeyJwk = await exportPublicJwk(minterKeyPair.publicKey);
-    let browserPublicKeyJwk: JsonWebKey | undefined;
-    let requestMessageId = "";
-    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
-      const url = requestUrl(input);
-      if (url.endsWith("/v1/pairing-codes/resolve")) {
-        expect(requestBody(init)["shortCode"]).toBe("123456");
-        return jsonResponse({
-          channelId: "ch_123",
-          shortCode: "123456",
-          expiresAt: "2030-01-01T00:00:00.000Z",
-          algorithm: "P256-HKDF-SHA256-AES-256-GCM",
-          minterPublicKeyJwk
-        });
-      }
-      if (url.endsWith("/v1/channels/ch_123/join")) {
-        const body = requestBody(init);
-        expect(body["shortCode"]).toBe("123456");
-        browserPublicKeyJwk = body["browserPublicKeyJwk"] as JsonWebKey;
-        return jsonResponse({
-          channelId: "ch_123",
-          browserToken: "bt_123",
-          algorithm: "P256-HKDF-SHA256-AES-256-GCM",
-          minterPublicKeyJwk,
-          expiresAt: "2030-01-01T00:00:00.000Z",
-          nextSeq: 1
-        });
-      }
-      if (url.endsWith("/v1/channels/ch_123/messages") && init?.method === "POST") {
-        requestMessageId = requestBody(init)["messageId"] as string;
-        return jsonResponse({ channelId: "ch_123", seq: 1, expiresAt: "2030-01-01T00:00:00.000Z" });
-      }
-      if (url.includes("/v1/channels/ch_123/messages?")) {
-        expect(browserPublicKeyJwk).toBeDefined();
-        return createSuccessMessage({
-          minterPrivateKey: minterKeyPair.privateKey,
-          browserPublicKeyJwk: browserPublicKeyJwk ?? {},
-          requestMessageId
-        });
-      }
-      throw new Error(`unexpected request ${url}`);
-    });
-    const session = await requestEphemeralSession({
-      pairing: { brokerBaseUrl: "https://pairing.example", shortCode: "123456" },
-      storage: false,
-      pollIntervalMs: 1,
-      fetchImpl
-    });
-    expect(session.sessionId).toBe("sess_123");
-    expect(fetchImpl).toHaveBeenCalledTimes(4);
-  });
-
-  it("rejects a join response with a substituted minter public key", async () => {
-    const pairingMinterKeyPair = await generateBrowserKeyPair();
-    const pairingMinterPublicKeyJwk = await exportPublicJwk(pairingMinterKeyPair.publicKey);
-    const substitutedMinterKeyPair = await generateBrowserKeyPair();
-    const substitutedMinterPublicKeyJwk = await exportPublicJwk(substitutedMinterKeyPair.publicKey);
-    const fetchImpl = vi.fn<typeof fetch>((input) => {
-      const url = requestUrl(input);
-      if (url.endsWith("/v1/channels/ch_123/join")) {
-        return Promise.resolve(jsonResponse({
-          channelId: "ch_123",
-          browserToken: "bt_123",
-          algorithm: "P256-HKDF-SHA256-AES-256-GCM",
-          minterPublicKeyJwk: substitutedMinterPublicKeyJwk,
-          expiresAt: "2030-01-01T00:00:00.000Z",
-          nextSeq: 1
-        }));
-      }
-      throw new Error(`unexpected request ${url}`);
-    });
-
-    await expect(requestEphemeralSession({
-      pairing: {
-        qrPayload: {
-          v: 1,
-          type: "ff-mint-pairing",
-          brokerBaseUrl: "https://pairing.example",
-          channelId: "ch_123",
-          pairingToken: "pt_123",
-          expiresAt: "2030-01-01T00:00:00.000Z",
-          algorithm: "P256-HKDF-SHA256-AES-256-GCM",
-          minterPublicKeyJwk: pairingMinterPublicKeyJwk
-        }
-      },
-      storage: false,
-      pollIntervalMs: 1,
-      fetchImpl
-    })).rejects.toThrow("channel join minter key mismatch");
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it("declares support for owner-kept sessions in every mint request", async () => {
@@ -629,16 +415,210 @@ describe("requestEphemeralSession", () => {
   ])("keeps an owner-kept session that $name", async ({ expiresAt }) => {
     const storage = memoryStorage();
     const { session } = await runMintFlow({
-      session: { persistent: true, ...(expiresAt === undefined ? {} : { expiresAt }) },
+      result: { type: "mint_succeeded", persistent: true, ...(expiresAt === undefined ? {} : { expiresAt }) },
       storage
     });
     expect(session).toEqual({
-      token: "browser-session-token",
+      token: "browser-session-token-secret",
       sessionId: "sess_123",
       persistent: true,
       relayerBaseUrl: "https://relayer.example"
     });
     expect(readStoredEphemeralBrowserSession(storage, testOrigin)).toEqual(session);
+  });
+
+  it("does not leak a token from a malformed broker response", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(() => Promise.resolve(new Response('{"browserToken":"bt_secret_1",', { status: 201 })));
+    const error = await captureError(requestEphemeralSession(baseOptions(fetchImpl)));
+    expect((error as Error).message).toBe("channel create failed: invalid response");
+    expectNoSecrets(error);
+  });
+
+  it("does not wait on a slow channel close before reporting a cancel", async () => {
+    const broker = await fakeBroker({ waitingPolls: Number.MAX_SAFE_INTEGER });
+    const controller = new AbortController();
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      if (init?.method === "DELETE") {
+        return new Promise<Response>(() => undefined);
+      }
+      return broker.fetchImpl(input, init);
+    });
+    const error = await captureError(requestEphemeralSession(baseOptions(fetchImpl, {
+      pollIntervalMs: 5,
+      signal: controller.signal,
+      onPairingMaterial: () => {
+        setTimeout(() => {
+          controller.abort();
+        }, 20);
+      }
+    })));
+    expect((error as PlayError).code).toBe("pairing_canceled");
+    expect(fetchImpl.mock.calls.some(([, init]) => init?.method === "DELETE")).toBe(true);
+  });
+
+  it("expires a channel whose poll stalls past the local deadline", async () => {
+    const broker = await fakeBroker();
+    const realNow = Date.now.bind(Date);
+    let skewMs = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + skewMs);
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      if ((init?.method ?? "GET") === "GET") {
+        // The poll hangs until aborted.
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("aborted", "AbortError"));
+          });
+        });
+      }
+      return broker.fetchImpl(input, init);
+    });
+    const error = await captureError(requestEphemeralSession(baseOptions(fetchImpl, {
+      idleTtlSeconds: 15,
+      onPairingMaterial: () => {
+        // 10 ms of the channel's life left when the first poll starts.
+        skewMs = 15_000 - 10;
+      }
+    })));
+    expect((error as PlayError).code).toBe("pairing_code_expired");
+  });
+
+  it("times out with approval_timeout when a result poll stalls past maxWaitMs", async () => {
+    const broker = await fakeBroker();
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      if (broker.mintRequests.length > 0 && (init?.method ?? "GET") === "GET") {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("aborted", "AbortError"));
+          });
+        });
+      }
+      return broker.fetchImpl(input, init);
+    });
+    const error = await captureError(requestEphemeralSession(baseOptions(fetchImpl, { maxWaitMs: 30 })));
+    expect((error as PlayError).code).toBe("approval_timeout");
+    expect(broker.channels).toHaveLength(1);
+  });
+
+  it("times out with approval_timeout when the mint_request POST never resolves", async () => {
+    const broker = await fakeBroker();
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      if (init?.method === "POST" && requestUrl(input).endsWith("/messages")) {
+        return new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => {
+            reject(new DOMException("aborted", "AbortError"));
+          });
+        });
+      }
+      return broker.fetchImpl(input, init);
+    });
+    const error = await captureError(requestEphemeralSession(baseOptions(fetchImpl, { maxWaitMs: 30 })));
+    expect((error as PlayError).code).toBe("approval_timeout");
+    expectNoSecrets(error);
+  });
+
+  it("treats a 410 on the mint_request POST as channel expiry", async () => {
+    const broker = await fakeBroker();
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      if (init?.method === "POST" && requestUrl(input).endsWith("/messages")) {
+        return Promise.resolve(jsonResponse({ error: "expired" }, 410));
+      }
+      return broker.fetchImpl(input, init);
+    });
+    const error = await captureError(requestEphemeralSession(baseOptions(fetchImpl)));
+    expect((error as PlayError).code).toBe("pairing_code_expired");
+    expectNoSecrets(error);
+    expect(broker.closed).toEqual(["ch_1"]);
+  });
+
+  it("regenerates when the channel expires between the peer joining and the request landing", async () => {
+    const broker = await fakeBroker();
+    let sends = 0;
+    const materials: PairingMaterial[] = [];
+    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+      if (init?.method === "POST" && requestUrl(input).endsWith("/messages")) {
+        sends += 1;
+        if (sends === 1) {
+          return Promise.resolve(jsonResponse({ error: "not_found" }, 404));
+        }
+      }
+      return broker.fetchImpl(input, init);
+    });
+    const session = await requestEphemeralSession(baseOptions(fetchImpl, {
+      channelRegenerations: 1,
+      onPairingMaterial: (material) => materials.push(material)
+    }));
+    expect(session.sessionId).toBe("sess_123");
+    expect(materials.map((material) => material.shortCode)).toEqual(["123451", "123452"]);
+    expect(broker.mintRequests.map((request) => request.channelId)).toEqual(["ch_2"]);
+  });
+
+  it("starts the channel clock after a slow create returns", async () => {
+    const broker = await fakeBroker();
+    const realNow = Date.now.bind(Date);
+    let skewMs = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + skewMs);
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const response = await broker.fetchImpl(input, init);
+      if (requestUrl(input) === `${brokerBaseUrl}/v1/channels`) {
+        // The create took longer than the channel's whole idle lifetime.
+        skewMs += 16_000;
+      }
+      return response;
+    });
+    const session = await requestEphemeralSession(baseOptions(fetchImpl, { idleTtlSeconds: 15 }));
+    expect(session.sessionId).toBe("sess_123");
+  });
+
+  it("does not post the mint_request when the visitor cancels during encryption", async () => {
+    const broker = await fakeBroker();
+    const controller = new AbortController();
+    const subtle = globalThis.crypto.subtle;
+    const realEncrypt = subtle.encrypt.bind(subtle);
+    vi.spyOn(subtle, "encrypt").mockImplementation((...args: Parameters<SubtleCrypto["encrypt"]>) => {
+      controller.abort();
+      return realEncrypt(...args);
+    });
+    const error = await captureError(requestEphemeralSession(baseOptions(broker.fetchImpl, { signal: controller.signal })));
+    expect((error as PlayError).code).toBe("pairing_canceled");
+    expect(broker.fetchImpl.mock.calls.some(([input, init]) => init?.method === "POST" && requestUrl(input).endsWith("/messages"))).toBe(false);
+    expect(broker.mintRequests).toEqual([]);
+  });
+
+  it("honours a cancel that lands while the result is being read, without storing", async () => {
+    const broker = await fakeBroker();
+    const storage = memoryStorage();
+    const controller = new AbortController();
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const response = await broker.fetchImpl(input, init);
+      if (broker.mintRequests.length > 0 && (init?.method ?? "GET") === "GET") {
+        controller.abort();
+      }
+      return response;
+    });
+    const error = await captureError(requestEphemeralSession(baseOptions(fetchImpl, { storage: { storage }, signal: controller.signal })));
+    expect((error as PlayError).code).toBe("pairing_canceled");
+    expect(storage.entries.size).toBe(0);
+  });
+
+  it("returns a stored session without creating a channel", async () => {
+    const broker = await fakeBroker();
+    const storage = memoryStorage();
+    storeEphemeralBrowserSession(storage, testOrigin, { token: "token-stored", sessionId: "sess_stored", expiresAt: "2030-01-01T00:00:00.000Z" });
+    const session = await requestEphemeralSession(baseOptions(broker.fetchImpl, { storage: { storage } }));
+    expect(session.sessionId).toBe("sess_stored");
+    expect(broker.fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "an invalid mint result carrying a token", options: { result: { type: "mint_succeeded", sessionId: "" } } },
+    { name: "a failed mint_request send", options: { sendStatus: 500 } },
+    { name: "an expired channel", options: { expiredChannels: 1 } },
+    { name: "a declined approval", options: { result: { type: "mint_rejected" } } }
+  ] satisfies { name: string; options: FakeBrokerOptions }[])("does not leak tokens in the error for $name", async ({ options }) => {
+    const broker = await fakeBroker(options);
+    const error = await captureError(requestEphemeralSession(baseOptions(broker.fetchImpl)));
+    expect(error).toBeInstanceOf(Error);
+    expectNoSecrets(error);
   });
 
   it("keeps storage keys origin scoped", () => {
@@ -728,59 +708,6 @@ describe("requestEphemeralSession", () => {
     expect(readStoredEphemeralBrowserSession(storage, testOrigin)).toBeUndefined();
   });
 
-  it("does not leak raw tokens in thrown errors", async () => {
-    const minterKeyPair = await generateBrowserKeyPair();
-    const minterPublicKeyJwk = await exportPublicJwk(minterKeyPair.publicKey);
-    let browserPublicKeyJwk: JsonWebKey | undefined;
-    let requestMessageId = "";
-    const rawToken = "super-secret-browser-session-token";
-    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
-      const url = requestUrl(input);
-      if (url.endsWith("/v1/channels/ch_123/join")) {
-        browserPublicKeyJwk = requestBody(init)["browserPublicKeyJwk"] as JsonWebKey;
-        return jsonResponse({
-          channelId: "ch_123",
-          browserToken: "bt_123",
-          algorithm: "P256-HKDF-SHA256-AES-256-GCM",
-          minterPublicKeyJwk,
-          expiresAt: "2030-01-01T00:00:00.000Z",
-          nextSeq: 1
-        });
-      }
-      if (url.endsWith("/v1/channels/ch_123/messages") && init?.method === "POST") {
-        requestMessageId = requestBody(init)["messageId"] as string;
-        return jsonResponse({ channelId: "ch_123", seq: 1, expiresAt: "2030-01-01T00:00:00.000Z" });
-      }
-      if (url.includes("/v1/channels/ch_123/messages?")) {
-        expect(browserPublicKeyJwk).toBeDefined();
-        return createSuccessMessage({
-          minterPrivateKey: minterKeyPair.privateKey,
-          browserPublicKeyJwk: browserPublicKeyJwk ?? {},
-          requestMessageId,
-          token: rawToken,
-          sessionId: ""
-        });
-      }
-      throw new Error(`unexpected request ${url}`);
-    });
-    await expect(requestEphemeralSession({
-      pairing: {
-        qrPayload: {
-          v: 1,
-          type: "ff-mint-pairing",
-          brokerBaseUrl: "https://pairing.example",
-          channelId: "ch_123",
-          pairingToken: "pt_123",
-          expiresAt: "2030-01-01T00:00:00.000Z",
-          algorithm: "P256-HKDF-SHA256-AES-256-GCM",
-          minterPublicKeyJwk
-        }
-      },
-      storage: false,
-      pollIntervalMs: 1,
-      fetchImpl
-    })).rejects.not.toThrow(rawToken);
-  });
 });
 
 describe("displayDp1Playlist", () => {

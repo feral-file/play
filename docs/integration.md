@@ -15,23 +15,37 @@ implement the same flow directly against the documented protocol
 What the visitor experiences:
 
 1. They press **Play on Art Computer** on your site.
-2. First time only: a popup asks for a six-digit pairing code. They turn on
-   **Browser Pairing** for their FF1 in the Feral File mobile app
-   (Settings → Art Computers → select the FF1), enter the code shown, and
-   approve the browser session in the app.
+2. First time only, a pairing dialog opens:
+   - **On a phone or tablet**, it shows **Open the Feral File app**. They tap it, the app
+     opens with the request, and they tap **Accept**. Below the button is a
+     six-digit code they can type into the app instead; tapping the code
+     copies it.
+   - **On a desktop or laptop**, it shows a QR code. They scan it with the phone camera
+     or the Feral File app, and tap **Accept** in the app. The same six-digit
+     code sits under the QR for typing in the app instead.
+
+   The dialog reads "Waiting for your Art Computer…" until the Art Computer
+   joins, then "Approve in the Feral File app…". A code lasts five minutes;
+   if it runs out, the dialog shows a fresh one, up to twice.
 3. The playlist plays on their Art Computer. Subsequent plays from your site
    skip pairing entirely — the browser session is remembered per site origin
    until it expires or is removed.
+
+The visitor never opens a settings page on the Art Computer or carries a code
+from it to your site: your site shows the request, and the app that holds the
+authority accepts it.
 
 Your site never receives device API keys or account credentials. It receives a
 revokable browser session token scoped to the display path only — short-lived
 by default, or kept until the owner removes it when they choose that.
 The mint request and the returned session travel end-to-end encrypted between
 the visitor's browser and their FF1, so the broker in the middle never sees
-session tokens or playlist content. The broker does see what channel join
-sends in the clear: the pairing code, your site's origin, and the browser
-metadata you supply in `browserInfo`. The full model is in
-[Sequential Flow](sequential-flow.md).
+session tokens or playlist content. The broker does see what channel creation
+sends in the clear: your site's origin, the browser metadata you supply in
+`browserInfo`, and the pairing code it issues. Your origin is attested, not
+claimed: the broker takes it from the `Origin` header your visitor's browser
+sets, so the approval sheet in the app names the site that actually asked. The
+full model is in [Sequential Flow](sequential-flow.md).
 
 ## What you need
 
@@ -69,8 +83,10 @@ mountPlayOnArtComputerButton({
 ```
 
 This renders the button, and on click: checks origin-scoped `localStorage` for
-a valid browser session; shows the pairing-code popup only when there is none;
-waits for approval in the mobile app; then sends the playlist to the FF1.
+a valid browser session; when there is none, creates a pairing channel and
+shows the pairing dialog (app button on a phone, QR on a desktop, the
+six-digit code on both); waits for the Art Computer to join and the owner to
+approve in the app; then sends the playlist to the FF1.
 
 `playlist` and `brokerBaseUrl` accept either a value or a (possibly async)
 function, so you can build the DP-1 document at click time from the visitor's
@@ -81,8 +97,17 @@ Useful options (see `PlayOnArtComputerButtonOptions` in
 
 - `buttonLabel`, `busyLabel`, `className`, `statusClassName` — restyle the
   button to match your site.
-- `dialog.copy`, `dialog.classNames` — override the popup's copy and styling
-  while keeping the pairing sequence.
+- `dialog.copy`, `dialog.classNames` — override the dialog's copy and styling
+  while keeping the pairing sequence (`PairingDialogCopy` and
+  `PairingDialogClassNames` in [`ui.ts`](../clients/session-recipient/js/src/ui.ts)).
+  `dialog.layout` forces `"mobile"` or `"desktop"`; the default, `"auto"`,
+  picks the app button on any touch device (a phone or tablet cannot scan a
+  QR on its own screen) and the QR on pointer devices.
+- `appLinkBaseUrl` — where the app link points. Defaults to
+  `https://link.feralfile.com/pair`; the library appends
+  `?channel=<id>&token=<pairingToken>`. That page opens the Feral File app
+  when it is installed and offers the install otherwise. The link carries no
+  broker URL: the Art Computer joins on the broker it is configured for.
 - `onStatusChange`, `onSuccess`, `onError` — drive your own status UI.
 - `browserInfo` — `{ name, userAgent, label }` shown to the user in the
   mobile-app approval prompt. Set `label` to something the visitor will
@@ -123,12 +148,35 @@ await displayDp1Playlist({
 ```
 
 - `requestEphemeralSessionWithPairingUi` reuses a stored session when one
-  exists, otherwise runs the pairing-code dialog and approval wait. Pass
-  `createDialog` to replace the dialog entirely (implement the
-  `PairingCodeDialog` interface).
-- `requestEphemeralSession` is the headless core: you supply the pairing input
-  (`{ brokerBaseUrl, shortCode }` from your own code entry UI, or
-  `{ qrPayload }` from a scanned QR) and it returns the session.
+  exists, otherwise creates a channel, shows the pairing dialog, and waits for
+  the Art Computer and the approval. It replaces an expired channel up to
+  twice, then fails with `approval_timeout`. Pass `createDialog` to replace
+  the dialog entirely: implement `PairingDialog`
+  (`{ show(material), setStatus(text), close() }`), and call the
+  `onCancel` you are handed when the visitor cancels. `show` is called again
+  with fresh material when a channel is replaced.
+- `requestEphemeralSession` is the headless core. It takes `brokerBaseUrl`
+  and hands you the pairing material through
+  `onPairingMaterial({ appLink, shortCode, expiresAt })`: open or encode
+  `appLink`, show `shortCode`. `onPeerJoined` fires when the Art Computer has
+  joined and approval has moved to the app. Pass an `AbortSignal` as `signal`
+  to cancel (`pairing_canceled`). It throws `pairing_code_expired` when the
+  channel expires before an Art Computer joins; set `channelRegenerations`
+  (up to 5) to have it replace the channel instead, calling
+  `onPairingMaterial` again each time.
+
+  ```ts
+  const session = await requestEphemeralSession({
+    brokerBaseUrl: "https://handoff.feralfile.com",
+    browserInfo: { label: "My Gallery" },
+    onPairingMaterial: ({ appLink, shortCode }) => showMyPairingUi(appLink, shortCode),
+    onPeerJoined: () => showMyStatus("Approve in the Feral File app…")
+  });
+  ```
+
+  The app link carries the channel's single-use pairing token. It dies with
+  the channel after five minutes idle, but until then it admits one Art
+  Computer: show it to the visitor, do not log it or send it to analytics.
 - `displayDp1Playlist` owns the relayer request envelope and response
   validation. Website code never constructs relayer commands directly.
 
@@ -165,13 +213,11 @@ codes will not. `pairingErrorMessage(error)` maps them to user-facing text.
 
 | `error.code` | Meaning |
 | :-- | :-- |
-| `pairing_code_not_found` | Code not found — user should re-enable Browser Pairing and use the latest code. |
-| `pairing_code_expired` | Code expired — same recovery. |
-| `pairing_code_used` | Code already used — same recovery. |
+| `pairing_code_expired` | The channel expired before an Art Computer joined (headless `requestEphemeralSession` with no `channelRegenerations`). Press play again for a fresh code. |
 | `mint_rejected` | User declined the approval in the mobile app. |
-| `approval_timeout` | No approval within `maxWaitMs` (default 5 minutes). |
+| `approval_timeout` | No approval within `maxWaitMs` (default 5 minutes) after the Art Computer joined, or every replacement channel expired before one joined. |
 | `session_rejected` | Stored session expired or revoked — the wrapped button clears it; custom integrations clear and re-pair. |
-| `pairing_canceled` | User closed the pairing dialog. |
+| `pairing_canceled` | User closed the pairing dialog, or your `signal` aborted. |
 | `display_failed` / `display_rejected` | The relayer or FF1 refused the display request. |
 
 ## Network endpoints
@@ -179,8 +225,8 @@ codes will not. `pairingErrorMessage(error)` maps them to user-facing text.
 The visitor's browser talks to two hosts. If your site sets a
 `Content-Security-Policy`, allow them in `connect-src`:
 
-- the Mint Pairing Broker (`https://handoff.feralfile.com`) — pairing-code
-  resolution, channel join, encrypted message send/poll
+- the Mint Pairing Broker (`https://handoff.feralfile.com`) — channel
+  creation, encrypted message send/poll, channel close
 - `ff-relayer` — the display request. Allow
   `https://tv-cast-coordination.autonomy-system.workers.dev`, the relayer Feral
   File operates today; you have to write the policy before any session exists.
@@ -188,6 +234,10 @@ The visitor's browser talks to two hosts. If your site sets a
   (`session.relayerBaseUrl`) — read it from there at runtime rather than
   hard-coding a host in your display code. If the host changes, the change is
   announced in the release notes for `@feralfile/play`.
+
+`https://link.feralfile.com` needs no entry. The app link is a navigation (the
+visitor taps it, or scans its QR with another device), never a `fetch`, and the
+QR is drawn in the page from the bundled library, with no image request.
 
 Playlist content does not travel through either host: the browser sends the
 DP-1 document to the relayer as part of the display command, and artwork media
@@ -207,8 +257,19 @@ uses the hosted broker by default, so no local server is needed.
 
 ## Status
 
-The requester library API documented here, the hosted broker, the mobile-app
-approval flow, and the FF1 display path work end to end today. One honest
+This guide documents `@feralfile/play` 0.4.0, where the site starts pairing.
+Libraries up to 0.3.x paired the other way — the Art Computer showed a code
+and the visitor typed it into the site — and the hosted broker still serves
+that path for sites that have not upgraded. Upgrading from 0.3.x: drop the
+`pairing` input from `requestEphemeralSession` and pass `brokerBaseUrl` plus
+`onPairingMaterial`; rename `createPairingCodeDialog` to `createPairingDialog`;
+stop matching `pairing_code_not_found` and `pairing_code_used`, which a site
+can no longer hit. The wrapped button needs no change.
+
+Site-initiated pairing needs the Art Computer software and Feral File app
+releases that can join a site's channel; until those are out, 0.3.x is the
+version that pairs. The hosted broker, the mobile-app approval flow, and the
+FF1 display path are the same for both. One honest
 caveat while this is pre-1.0: expect additive API change between 0.x versions.
 Sessions authorize the display/cast path only — that is by design, and the
 scope will stay narrow.
