@@ -248,8 +248,9 @@ Content-Type: application/json
 The joiner is always the opposite of `creatorRole`. The credential is exactly
 one of `pairingToken` or `shortCode`; short-code joins are rate limited per
 channel. A join consumes the pairing token and short code (`waiting` →
-`paired`); a second join is `401 unauthorized`. Sending the other role's key
-field is `400 invalid_request`.
+`paired`) and renews `expiresAt` to a full idle TTL from the join; a second
+join is `401 unauthorized`. Sending the other role's key field is
+`400 invalid_request`.
 
 Minter joining a browser-created channel (site-initiated):
 
@@ -315,7 +316,7 @@ Response:
 
 ### Send Message
 
-Used by both libraries. This is the only operation that extends channel TTL.
+Used by both libraries. Each accepted message extends channel TTL; the only other operation that does is a successful join, once.
 
 ```http
 POST /v1/channels/{channelId}/messages

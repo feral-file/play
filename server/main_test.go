@@ -255,15 +255,14 @@ func TestDuplicateMessageRejected(t *testing.T) {
 	}
 }
 
-func TestTTLOnlyExtendsOnAcceptedMessages(t *testing.T) {
+func TestTTLExtendsOnJoinAndAcceptedMessagesOnly(t *testing.T) {
 	env := newTestEnv(t)
 	created := createChannel(t, env, false)
-	initialExpiresAt := created.ExpiresAt
 
 	*env.clock = env.clock.Add(5 * time.Second)
 	joined := joinWithPairingToken(t, env, created)
-	if joined.ExpiresAt != initialExpiresAt {
-		t.Fatalf("join extended TTL: got %s, want %s", joined.ExpiresAt, initialExpiresAt)
+	if want := formatTime(env.clock.Add(15 * time.Second)); joined.ExpiresAt != want {
+		t.Fatalf("join expiresAt = %s, want %s (renewed from the join)", joined.ExpiresAt, want)
 	}
 
 	*env.clock = env.clock.Add(2 * time.Second)
@@ -1479,4 +1478,36 @@ func TestCreateMintRequestValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A minter that joins late, while the site's page is suspended and sends
+// nothing, still gets a full idle TTL to ask the owner: the join renews the
+// deadline (play#17 review F1).
+func TestLateMinterJoinRenewsTheDeadline(t *testing.T) {
+	env := newTestEnv(t)
+	created := createBrowserChannel(t, env, false)
+
+	*env.clock = env.clock.Add(14 * time.Second) // 1 s before the create-time deadline
+	var joined JoinChannelResponse
+	status, errCode := postJSON(t, env.server.URL+"/v1/channels/"+created.ChannelID+"/join", "", JoinChannelRequest{PairingToken: created.PairingToken, MinterPublicKeyJWK: alternatePublicJWK}, &joined)
+	if status != http.StatusCreated || errCode != "" {
+		t.Fatalf("late join status/error = %d/%q, want 201", status, errCode)
+	}
+	if want := formatTime(env.clock.Add(15 * time.Second)); joined.ExpiresAt != want {
+		t.Fatalf("late join expiresAt = %s, want %s", joined.ExpiresAt, want)
+	}
+
+	// Past the create-time deadline, inside the renewed one: the minter can
+	// still deliver to the suspended page.
+	*env.clock = env.clock.Add(10 * time.Second)
+	appendMessage(t, env, created.ChannelID, joined.MinterToken, AppendMessageRequest{
+		MessageID:          "msg_result",
+		Sender:             roleMinter,
+		Recipient:          roleBrowser,
+		Algorithm:          algorithm,
+		AAD:                "aad",
+		Nonce:              "nonce",
+		Ciphertext:         "ciphertext",
+		SenderPublicKeyJWK: alternatePublicJWK,
+	})
 }

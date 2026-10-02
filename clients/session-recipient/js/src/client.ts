@@ -638,6 +638,8 @@ const defaultResultPollIntervalMs = 5000;
 const peerPollFastIntervalMs = 1000;
 const peerPollSlowIntervalMs = 2000;
 const peerPollFastCount = 10;
+/** How long the last peer check after the local deadline may take. */
+const finalPeerCheckTimeoutMs = 10_000;
 
 function validateIdleTtlSeconds(value: number | undefined): number {
   if (value === undefined) {
@@ -690,23 +692,29 @@ type PairingContext = {
 /**
  * Waits for the Art Computer to join the channel and returns its public key.
  * Throws ChannelGoneError when the channel expires first.
+ *
+ * The local deadline is the create-time one, but the broker's can be later: a
+ * join renews it, and an Art Computer that answers the announced request can
+ * deliver the session while this page is suspended. So a page that wakes past
+ * its local deadline checks the broker once more before it gives the channel
+ * up, and only a channel the device never joined is abandoned on the clock.
  */
 async function waitForPeer(context: PairingContext, channel: BrowserChannel, localDeadline: number): Promise<ChannelPeer> {
   let polls = 0;
   for (;;) {
     throwIfAborted(context.signal);
-    if (Date.now() >= localDeadline) {
-      throw new ChannelGoneError();
-    }
+    const pastDeadline = Date.now() >= localDeadline;
     let poll: PollMessagesResponse | undefined;
     // Bound each poll by the channel deadline too, so a stalled request cannot
-    // hold the dialog on an expired code.
+    // hold the dialog on an expired code; the last check gets a short bound of
+    // its own.
     const pollController = new AbortController();
     const onCancel = (): void => {
       pollController.abort();
     };
     context.signal?.addEventListener("abort", onCancel, { once: true });
-    const deadlineTimer = setTimeout(onCancel, Math.max(0, localDeadline - Date.now()));
+    const bound = pastDeadline ? finalPeerCheckTimeoutMs : localDeadline - Date.now();
+    const deadlineTimer = setTimeout(onCancel, Math.max(0, bound));
     try {
       poll = await pollMessages({ fetcher: context.fetcher, channel, afterSeq: 0, signal: pollController.signal });
     } catch (error) {
@@ -717,12 +725,18 @@ async function waitForPeer(context: PairingContext, channel: BrowserChannel, loc
       if (!(error instanceof TypeError)) {
         throw error;
       }
+      if (pastDeadline) {
+        throw new ChannelGoneError();
+      }
     } finally {
       clearTimeout(deadlineTimer);
       context.signal?.removeEventListener("abort", onCancel);
     }
     if (poll?.peer !== undefined) {
       return poll.peer;
+    }
+    if (pastDeadline) {
+      throw new ChannelGoneError();
     }
     polls += 1;
     const interval = context.pollIntervalMs ?? (polls < peerPollFastCount ? peerPollFastIntervalMs : peerPollSlowIntervalMs);

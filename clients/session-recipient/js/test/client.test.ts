@@ -298,6 +298,47 @@ describe("requestEphemeralSession", () => {
     expect(broker.closed).toEqual(["ch_1"]);
   });
 
+  it("collects a session the Art Computer delivered while the page was suspended past its local deadline", async () => {
+    // The device joined and answered the announced request while the page
+    // slept; the broker renewed the channel. The page wakes 16 s after a 15 s
+    // channel was created and must read the result, not abandon the channel.
+    const broker = await fakeBroker({ answersFromCreate: true, waitingPolls: 0 });
+    const storage = memoryStorage();
+    const realNow = Date.now.bind(Date);
+    let skewMs = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + skewMs);
+    const session = await requestEphemeralSession(baseOptions(broker.fetchImpl, {
+      idleTtlSeconds: 15,
+      storage: { storage },
+      onPairingMaterial: () => {
+        skewMs = 16_000;
+      }
+    }));
+    expect(session.token).toBe("browser-session-token-secret");
+    expect(storage.entries.has(ephemeralBrowserSessionStorageKey(testOrigin))).toBe(true);
+    expect(broker.closed).toEqual([]);
+    expect(broker.channels).toHaveLength(1);
+  });
+
+  it("abandons a channel the device never joined once a page wakes past its local deadline", async () => {
+    const broker = await fakeBroker({ waitingPolls: Number.MAX_SAFE_INTEGER });
+    const realNow = Date.now.bind(Date);
+    let skewMs = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + skewMs);
+    const error = await captureError(requestEphemeralSession(baseOptions(broker.fetchImpl, {
+      idleTtlSeconds: 15,
+      channelRegenerations: 0,
+      onPairingMaterial: () => {
+        skewMs = 16_000;
+      }
+    })));
+    expect((error as PlayError).code).toBe("pairing_code_expired");
+    // One last look at the broker before giving the channel up.
+    const polls = broker.requests.filter((request) => request.url.includes("/messages?"));
+    expect(polls.length).toBeGreaterThanOrEqual(1);
+    expect(broker.closed).toEqual(["ch_1"]);
+  });
+
   it("replaces an expired channel with a fresh one and fresh pairing material", async () => {
     const broker = await fakeBroker({ expiredChannels: 1 });
     const materials: PairingMaterial[] = [];

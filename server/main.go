@@ -743,6 +743,17 @@ func (b *Broker) handleJoinChannel(w http.ResponseWriter, r *http.Request, chann
 		record.Status = statusPaired
 		record.PairedAt = formatTime(now)
 		record.PairingConsumedAt = formatTime(now)
+		// A join is activity: it renews the idle deadline as an accepted
+		// message does. A minter that answers the site's announced request
+		// asks the owner at join, before any message lands, so without this a
+		// late join would leave the approval only what remained of the
+		// create-time deadline (play#17).
+		joinExpiresAt := now.Add(time.Duration(record.IdleTTLSeconds) * time.Second)
+		record.LastMessageAt = formatTime(now)
+		record.ExpiresAt = formatTime(joinExpiresAt)
+		if err := tx.Bucket([]byte(bucketCleanupByExpiry)).Put(cleanupKey(joinExpiresAt, channelID), nil); err != nil {
+			return err
+		}
 		if joinerRole == roleBrowser {
 			record.BrowserPublicKeyJWK = cloneRaw(req.BrowserPublicKeyJWK)
 		} else {
