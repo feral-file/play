@@ -353,7 +353,8 @@ describe("requestEphemeralSession", () => {
     // The create call resolves after the visitor has already canceled.
     const fetcher: typeof fetch = async (input, init) => {
       const response = await broker.fetchImpl(input, init);
-      if (String(input).endsWith("/v1/channels") && init?.method === "POST") {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url.endsWith("/v1/channels") && init?.method === "POST") {
         controller.abort();
       }
       return response;
