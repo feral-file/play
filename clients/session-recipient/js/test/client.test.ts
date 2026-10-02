@@ -347,6 +347,28 @@ describe("requestEphemeralSession", () => {
     expect(broker.mintRequests).toEqual([]);
   });
 
+  it("hands out no pairing material when the cancel lands while the channel is created", async () => {
+    const broker = await fakeBroker({ waitingPolls: Number.MAX_SAFE_INTEGER });
+    const controller = new AbortController();
+    // The create call resolves after the visitor has already canceled.
+    const fetcher: typeof fetch = async (input, init) => {
+      const response = await broker.fetchImpl(input, init);
+      if (String(input).endsWith("/v1/channels") && init?.method === "POST") {
+        controller.abort();
+      }
+      return response;
+    };
+    const materials: unknown[] = [];
+    const error = await captureError(requestEphemeralSession(baseOptions(fetcher, {
+      pollIntervalMs: 5,
+      signal: controller.signal,
+      onPairingMaterial: (material) => materials.push(material)
+    })));
+    expect((error as PlayError).code).toBe("pairing_canceled");
+    expect(materials).toEqual([]);
+    expect(broker.closed).toEqual(["ch_1"]);
+  });
+
   it("maps a declined approval to mint_rejected without storing", async () => {
     const storage = memoryStorage();
     const error = await captureError(runMintFlow({ result: { type: "mint_rejected" }, storage }));
