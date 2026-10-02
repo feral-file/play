@@ -77,6 +77,9 @@ type Channel struct {
 	joined           bool
 	requester        JoinedRequester
 	joinedBrowserJWK PublicJWK
+	// joinedRequest is the mint request the site sent with its create call,
+	// when it sent one (see JoinedMintRequest).
+	joinedRequest *MintRequest
 }
 
 // StartChannel creates a temporary broker channel and returns local channel
@@ -218,8 +221,39 @@ func (c *Client) JoinChannel(ctx context.Context, opts JoinChannelOptions) (*Cha
 			BrowserInfo: browserInfo,
 		},
 		joinedBrowserJWK: *response.BrowserPublicKeyJWK,
+		joinedRequest:    joinedMintRequest(channelID, response, browserInfo),
 		expiresAt:        response.ExpiresAt,
 	}, nil
+}
+
+// joinedMintRequest builds the mint request a site sent with its create call,
+// or returns nil when it sent none or sent one this library cannot read. A nil
+// result is never an error: the site still sends its encrypted mint_request
+// once it sees the device, and PollMintRequest answers that as before.
+func joinedMintRequest(channelID string, response joinChannelResponse, browserInfo BrowserInfo) *MintRequest {
+	if len(response.MintRequest) == 0 {
+		return nil
+	}
+	var metadata joinedMintRequestMetadata
+	if err := json.Unmarshal(response.MintRequest, &metadata); err != nil {
+		return nil
+	}
+	if metadata.Version != 1 || metadata.RequestMessageID == "" || len(metadata.RequestMessageID) > maxRequestMessageIDBytes {
+		return nil
+	}
+	requestedExpiresInSeconds, err := parseRequestedExpiresInSeconds(metadata.RequestedExpiresInSeconds)
+	if err != nil {
+		return nil
+	}
+	return &MintRequest{
+		ChannelID:                  channelID,
+		MessageID:                  metadata.RequestMessageID,
+		Origin:                     response.Origin,
+		BrowserInfo:                browserInfo,
+		BrowserPublicKeyJWK:        *response.BrowserPublicKeyJWK,
+		RequestedExpiresInSeconds:  requestedExpiresInSeconds,
+		SupportsPersistentSessions: metadata.SupportsPersistentSessions,
+	}
 }
 
 // Requester returns what the broker attested when this minter joined a
@@ -227,6 +261,32 @@ func (c *Client) JoinChannel(ctx context.Context, opts JoinChannelOptions) (*Cha
 // created.
 func (ch *Channel) Requester() JoinedRequester {
 	return ch.requester
+}
+
+// JoinedMintRequest returns the mint request the site sent with its create
+// call, so the host can ask the owner for approval as soon as it joins rather
+// than when the site's page next polls (a phone browser stops polling while the
+// visitor is in the app). ok is false on a channel this minter created, and on
+// a joined channel whose site sent no request metadata: the host then waits for
+// the encrypted request through PollMintRequest.
+//
+// The request carries the broker-attested origin, browser info and browser
+// key, Seq 0, and the site's requestMessageId as MessageID. A site that sends
+// metadata also sends the encrypted mint_request with that same message id
+// once it sees the device, for devices that predate this; a host that answered
+// the joined request must not answer that copy again.
+//
+// Trust: these fields come from the broker, not from an end-to-end encrypted
+// message. That is the model a joined channel already has for the browser key
+// (PollMintRequest refuses any request not encrypted with the key the broker
+// returned at join, and results are encrypted to that key), so the broker
+// remains the channel's key distributor, now also for the requested lifetime
+// and the persistent-session capability. The owner's approval still decides.
+func (ch *Channel) JoinedMintRequest() (MintRequest, bool) {
+	if ch.joinedRequest == nil {
+		return MintRequest{}, false
+	}
+	return *ch.joinedRequest, true
 }
 
 // ExpiresAt returns the latest channel expiry the broker reported: at create

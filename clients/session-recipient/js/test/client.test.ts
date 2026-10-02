@@ -138,6 +138,12 @@ describe("requestEphemeralSession", () => {
       browserPublicKeyJwk: expect.objectContaining({ kty: "EC", crv: "P-256" }) as unknown,
       origin: testOrigin,
       browserInfo: expect.objectContaining({ name: "Test Browser", label: "Test Gallery" }) as unknown,
+      mintRequest: {
+        v: 1,
+        requestMessageId: expect.stringMatching(/^msg_/) as unknown,
+        supportsPersistentSessions: true,
+        requestedAt: expect.any(String) as unknown
+      },
       idleTtlSeconds: 300,
       shortCodeRequested: true
     });
@@ -148,7 +154,7 @@ describe("requestEphemeralSession", () => {
       "GET https://pairing.example/v1/channels/ch_1/messages?afterSeq=0",
       "GET https://pairing.example/v1/channels/ch_1/messages?afterSeq=0",
       "POST https://pairing.example/v1/channels/ch_1/messages",
-      "GET https://pairing.example/v1/channels/ch_1/messages?afterSeq=1"
+      "GET https://pairing.example/v1/channels/ch_1/messages?afterSeq=0"
     ]);
     expect(broker.closed).toEqual([]);
   });
@@ -389,6 +395,40 @@ describe("requestEphemeralSession", () => {
     const { mintRequest } = await runMintFlow();
     expect(mintRequest["type"]).toBe("mint_request");
     expect(mintRequest).not.toHaveProperty("requestedExpiresInSeconds");
+  });
+
+  it("announces the mint request at create under the id its encrypted copy carries", async () => {
+    const broker = await fakeBroker();
+    await requestEphemeralSession(baseOptions(broker.fetchImpl, { requestedExpiresInSeconds: 600 }));
+
+    const announced = broker.channels[0]?.createBody["mintRequest"] as Record<string, unknown> | undefined;
+    const sent = broker.mintRequests[0];
+    if (announced === undefined || sent === undefined) {
+      throw new Error("mint request was not announced and sent");
+    }
+    expect(announced).toEqual({
+      v: 1,
+      requestMessageId: sent.envelope["messageId"],
+      supportsPersistentSessions: true,
+      requestedExpiresInSeconds: 600,
+      requestedAt: sent.plaintext["requestedAt"]
+    });
+    expect(sent.plaintext["requestMessageId"]).toBe(announced["requestMessageId"]);
+  });
+
+  it("collects an answer the Art Computer gave from the announced request before the page sent its copy", async () => {
+    const broker = await fakeBroker({ answersFromCreate: true, waitingPolls: 2 });
+    const storage = memoryStorage();
+
+    const session = await requestEphemeralSession(baseOptions(broker.fetchImpl, { storage: { storage } }));
+
+    expect(session.token).toBe("browser-session-token-secret");
+    expect(storage.entries.has(ephemeralBrowserSessionStorageKey(testOrigin))).toBe(true);
+    // The encrypted copy still goes out for devices that predate announcing,
+    // and the answer is read from the start of the channel.
+    expect(broker.mintRequests).toHaveLength(1);
+    const urls = broker.requests.map((request) => `${request.init?.method ?? "GET"} ${request.url}`);
+    expect(urls.at(-1)).toBe("GET https://pairing.example/v1/channels/ch_1/messages?afterSeq=0");
   });
 
   it("sends the maximum requested session lifetime", async () => {
@@ -842,6 +882,33 @@ describe("displayDp1Playlist", () => {
       },
       fetchImpl
     })).rejects.not.toThrow("Private Playlist");
+  });
+
+  it("retries the cast once after a network failure", async () => {
+    let calls = 0;
+    const fetchImpl = vi.fn<typeof fetch>(() => {
+      calls += 1;
+      if (calls === 1) {
+        return Promise.reject(new TypeError("Failed to fetch"));
+      }
+      return Promise.resolve(jsonResponse({ message: { ok: true } }));
+    });
+    await displayDp1Playlist({
+      session: { token: "browser-session-token", sessionId: "sess_123", expiresAt: "2030-01-01T00:00:00.000Z", relayerBaseUrl: "https://relayer.example" },
+      playlist: { dpVersion: "1.1.0", title: "Browser Playlist", items: [] },
+      fetchImpl
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives up after a second network failure", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(() => Promise.reject(new TypeError("Failed to fetch")));
+    await expect(displayDp1Playlist({
+      session: { token: "browser-session-token", sessionId: "sess_123", expiresAt: "2030-01-01T00:00:00.000Z", relayerBaseUrl: "https://relayer.example" },
+      playlist: { dpVersion: "1.1.0", title: "Browser Playlist", items: [] },
+      fetchImpl
+    })).rejects.toThrow(TypeError);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
   it("requires a relayer URL", async () => {

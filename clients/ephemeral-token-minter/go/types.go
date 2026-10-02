@@ -18,6 +18,11 @@ const (
 	// requester may ask for: one year, the same bound the JS requester enforces
 	// before it sends the request.
 	MaxRequestedExpiresInSeconds = 31536000
+
+	// maxRequestMessageIDBytes is the broker's message id bound: a request
+	// message id the site announces at create must fit in the message it later
+	// sends with that id.
+	maxRequestMessageIDBytes = 128
 )
 
 // PublicJWK is a JSON/JWK-compatible P-256 public key.
@@ -262,7 +267,21 @@ type joinChannelResponse struct {
 	BrowserPublicKeyJWK *PublicJWK      `json:"browserPublicKeyJwk"`
 	Origin              string          `json:"origin"`
 	BrowserInfo         json.RawMessage `json:"browserInfo,omitempty"`
+	MintRequest         json.RawMessage `json:"mintRequest,omitempty"`
 	ExpiresAt           time.Time       `json:"expiresAt"`
+}
+
+// joinedMintRequestMetadata is the mint request a site sent with its create
+// call (play#17). The origin, browser key and browser info are not repeated
+// here: they are the channel's, attested at create and returned at join.
+type joinedMintRequestMetadata struct {
+	Version          int    `json:"v"`
+	RequestMessageID string `json:"requestMessageId"`
+	// RequestedExpiresInSeconds stays a json.Number for the same reason as in
+	// mintRequestPlaintext: absent and malformed must be told apart.
+	RequestedExpiresInSeconds  json.Number `json:"requestedExpiresInSeconds,omitempty"`
+	SupportsPersistentSessions bool        `json:"supportsPersistentSessions,omitempty"`
+	RequestedAt                string      `json:"requestedAt,omitempty"`
 }
 
 type pollMessagesResponse struct {

@@ -40,11 +40,16 @@ const (
 	maxEncryptedPayloadBytes = 64 * 1024
 	maxPublicKeyJWKBytes     = 8 * 1024
 	maxBrowserInfoBytes      = 8 * 1024
-	maxOriginBytes           = 2048
-	maxMessageIDBytes        = 128
-	maxAADBytes              = 8 * 1024
-	maxNonceBytes            = 512
-	maxPollMessages          = 100
+	// maxMintRequestBytes bounds the mint request metadata a site sends with a
+	// browser create. It carries a message id, a lifetime, a capability flag
+	// and a timestamp; the origin, key and browser info ride on the channel
+	// already.
+	maxMintRequestBytes = 1024
+	maxOriginBytes      = 2048
+	maxMessageIDBytes   = 128
+	maxAADBytes         = 8 * 1024
+	maxNonceBytes       = 512
+	maxPollMessages     = 100
 
 	shortCodeDigits       = 6
 	shortCodeAttemptLimit = 8
@@ -114,7 +119,14 @@ type ChannelRecord struct {
 	// browser created the channel. Empty for minter-created channels.
 	Origin string `json:"origin,omitempty"`
 	// BrowserInfo is optional requester metadata for browser-created channels.
-	BrowserInfo           json.RawMessage `json:"browserInfo,omitempty"`
+	BrowserInfo json.RawMessage `json:"browserInfo,omitempty"`
+	// MintRequest is the site's mint request metadata, sent at create so the
+	// joining minter can raise the owner's approval without waiting for the
+	// site's page to come back to the foreground (play#17). Optional and
+	// opaque to the broker beyond its size and object shape; only
+	// browser-created channels carry it. It is not secret: the session the
+	// device mints in answer still travels end-to-end encrypted.
+	MintRequest           json.RawMessage `json:"mintRequest,omitempty"`
 	PairingTokenHash      string          `json:"pairingTokenHash"`
 	PairingConsumedAt     string          `json:"pairingConsumedAt,omitempty"`
 	ShortCodeHash         string          `json:"shortCodeHash,omitempty"`
@@ -151,6 +163,7 @@ type CreateChannelRequest struct {
 	BrowserPublicKeyJWK json.RawMessage `json:"browserPublicKeyJwk,omitempty"`
 	Origin              string          `json:"origin,omitempty"`
 	BrowserInfo         json.RawMessage `json:"browserInfo,omitempty"`
+	MintRequest         json.RawMessage `json:"mintRequest,omitempty"`
 	IdleTTLSeconds      int             `json:"idleTtlSeconds"`
 	ShortCodeRequested  bool            `json:"shortCodeRequested"`
 }
@@ -185,6 +198,7 @@ type JoinChannelResponse struct {
 	BrowserPublicKeyJWK json.RawMessage `json:"browserPublicKeyJwk,omitempty"`
 	Origin              string          `json:"origin,omitempty"`
 	BrowserInfo         json.RawMessage `json:"browserInfo,omitempty"`
+	MintRequest         json.RawMessage `json:"mintRequest,omitempty"`
 	ExpiresAt           string          `json:"expiresAt"`
 	NextSeq             uint64          `json:"nextSeq"`
 }
@@ -443,6 +457,7 @@ func (b *Broker) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 		record.BrowserPublicKeyJWK = cloneRaw(req.BrowserPublicKeyJWK)
 		record.Origin = req.Origin
 		record.BrowserInfo = cloneRaw(req.BrowserInfo)
+		record.MintRequest = cloneRaw(req.MintRequest)
 	} else {
 		record.MinterPublicKeyJWK = cloneRaw(req.MinterPublicKeyJWK)
 	}
@@ -569,7 +584,7 @@ func validateCreateRequest(req *CreateChannelRequest, headerOrigin string) (stri
 		if !validJSONObject(req.MinterPublicKeyJWK, maxPublicKeyJWKBytes) {
 			return "", false
 		}
-		if rawPresent(req.BrowserPublicKeyJWK) || req.Origin != "" || rawPresent(req.BrowserInfo) {
+		if rawPresent(req.BrowserPublicKeyJWK) || req.Origin != "" || rawPresent(req.BrowserInfo) || rawPresent(req.MintRequest) {
 			return "", false
 		}
 		return roleMinter, true
@@ -578,6 +593,9 @@ func validateCreateRequest(req *CreateChannelRequest, headerOrigin string) (stri
 			return "", false
 		}
 		if !validOptionalJSONObject(req.BrowserInfo, maxBrowserInfoBytes) {
+			return "", false
+		}
+		if !validOptionalJSONObject(req.MintRequest, maxMintRequestBytes) {
 			return "", false
 		}
 		if !validAttestedOrigin(headerOrigin) {
@@ -770,6 +788,7 @@ func (b *Broker) handleJoinChannel(w http.ResponseWriter, r *http.Request, chann
 			response.BrowserPublicKeyJWK = cloneRaw(record.BrowserPublicKeyJWK)
 			response.Origin = record.Origin
 			response.BrowserInfo = cloneRaw(record.BrowserInfo)
+			response.MintRequest = cloneRaw(record.MintRequest)
 		}
 		return nil
 	})

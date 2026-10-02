@@ -68,6 +68,11 @@ export type FakeBrokerOptions = {
   networkFailures?: number;
   /** Peer override for the paired poll response. */
   peer?: (minterPublicKeyJwk: JsonWebKey) => unknown;
+  /**
+   * The Art Computer answers from the request the site announced at create,
+   * as soon as it joins and before the page sends its encrypted copy (play#17).
+   */
+  answersFromCreate?: boolean;
 };
 
 export type CreatedChannel = {
@@ -107,7 +112,20 @@ export async function fakeBroker(options: FakeBrokerOptions = {}) {
     return channel;
   }
 
-  async function resultResponse(channel: CreatedChannel, request: SentMintRequest): Promise<Response> {
+  /** The request as a device that read the create metadata sees it. */
+  function announcedRequest(channel: CreatedChannel): SentMintRequest {
+    const announced = channel.createBody["mintRequest"] as Record<string, unknown>;
+    return {
+      channelId: channel.channelId,
+      envelope: {},
+      plaintext: {
+        requestMessageId: announced["requestMessageId"],
+        browserPublicKeyJwk: channel.createBody["browserPublicKeyJwk"]
+      }
+    };
+  }
+
+  async function resultResponse(channel: CreatedChannel, request: SentMintRequest, seq = 2, afterSeq = 0): Promise<Response> {
     const result = options.result ?? { type: "mint_succeeded" };
     const requestMessageId = result.requestMessageId === undefined
       ? request.plaintext["requestMessageId"] as string
@@ -150,7 +168,7 @@ export async function fakeBroker(options: FakeBrokerOptions = {}) {
       status: "paired",
       expiresAt: "2030-01-01T00:00:00.000Z",
       peer: { role: "minter", publicKeyJwk: minterPublicKeyJwk },
-      messages: [{ seq: 2, ...encrypted }]
+      messages: seq > afterSeq ? [{ seq, ...encrypted }] : []
     });
   }
 
@@ -206,12 +224,20 @@ export async function fakeBroker(options: FakeBrokerOptions = {}) {
       if (options.sendStatus !== undefined) {
         return jsonResponse({ error: "failed" }, options.sendStatus);
       }
-      return jsonResponse({ channelId: channel.channelId, seq: 1, expiresAt: "2030-01-01T00:00:00.000Z" }, 201);
+      // Answering from the announcement put the answer at seq 1 first.
+      const seq = options.answersFromCreate === true ? 2 : 1;
+      return jsonResponse({ channelId: channel.channelId, seq, expiresAt: "2030-01-01T00:00:00.000Z" }, 201);
     }
     if (method === "GET" && url.includes("/messages?")) {
       const channelNumber = channels.indexOf(channel) + 1;
       if (channelNumber <= (options.expiredChannels ?? 0)) {
         return jsonResponse({ error: "expired" }, 410);
+      }
+      if (options.answersFromCreate === true && (pollsByChannel.get(channel.channelId) ?? 0) >= (options.waitingPolls ?? 1)) {
+        // The device answered from the announcement at seq 1 and ignores the
+        // page's encrypted copy, which lands after it.
+        const afterSeq = Number(new URL(url).searchParams.get("afterSeq") ?? "0");
+        return resultResponse(channel, announcedRequest(channel), 1, afterSeq);
       }
       const request = mintRequests.find((candidate) => candidate.channelId === channel.channelId);
       if (request !== undefined) {
