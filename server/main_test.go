@@ -255,15 +255,14 @@ func TestDuplicateMessageRejected(t *testing.T) {
 	}
 }
 
-func TestTTLOnlyExtendsOnAcceptedMessages(t *testing.T) {
+func TestTTLExtendsOnJoinAndAcceptedMessagesOnly(t *testing.T) {
 	env := newTestEnv(t)
 	created := createChannel(t, env, false)
-	initialExpiresAt := created.ExpiresAt
 
 	*env.clock = env.clock.Add(5 * time.Second)
 	joined := joinWithPairingToken(t, env, created)
-	if joined.ExpiresAt != initialExpiresAt {
-		t.Fatalf("join extended TTL: got %s, want %s", joined.ExpiresAt, initialExpiresAt)
+	if want := formatTime(env.clock.Add(15 * time.Second)); joined.ExpiresAt != want {
+		t.Fatalf("join expiresAt = %s, want %s (renewed from the join)", joined.ExpiresAt, want)
 	}
 
 	*env.clock = env.clock.Add(2 * time.Second)
@@ -1407,4 +1406,108 @@ func TestClientHostFallsBackToRemoteAddr(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The site's mint request metadata rides the create call and is handed to the
+// minter at join, so the device can raise the approval while the visitor is
+// still in the app (play#17).
+func TestBrowserCreateMintRequestReachesMinterJoin(t *testing.T) {
+	env := newTestEnv(t)
+	mintRequest := json.RawMessage(`{"v":1,"requestMessageId":"msg_site_request","supportsPersistentSessions":true,"requestedAt":"2026-10-02T10:00:00Z"}`)
+	body := browserCreateBody()
+	body.Origin = testSiteOrigin
+	body.MintRequest = mintRequest
+	var created CreateChannelResponse
+	status, errCode := postJSONWithHeaders(t, env.broker, "203.0.113.5:4321", "/v1/channels", map[string]string{"Origin": testSiteOrigin}, body, &created)
+	if status != http.StatusCreated || errCode != "" {
+		t.Fatalf("browser create with mint request status/error = %d/%q, want 201", status, errCode)
+	}
+	var rawCreate map[string]json.RawMessage
+	remarshal(t, created, &rawCreate)
+	if _, ok := rawCreate["mintRequest"]; ok {
+		t.Fatal("create response echoed mintRequest to the browser")
+	}
+
+	var joined JoinChannelResponse
+	status, errCode = postJSON(t, env.server.URL+"/v1/channels/"+created.ChannelID+"/join", "", JoinChannelRequest{PairingToken: created.PairingToken, MinterPublicKeyJWK: alternatePublicJWK}, &joined)
+	if status != http.StatusCreated || errCode != "" {
+		t.Fatalf("minter join status/error = %d/%q, want 201", status, errCode)
+	}
+	if !equalJSON(joined.MintRequest, mintRequest) {
+		t.Fatalf("minter join mintRequest = %s, want %s", joined.MintRequest, mintRequest)
+	}
+}
+
+func TestBrowserCreateWithoutMintRequestJoinsUnchanged(t *testing.T) {
+	env := newTestEnv(t)
+	created := createBrowserChannel(t, env, false)
+	var rawJoin map[string]json.RawMessage
+	status, errCode := postJSON(t, env.server.URL+"/v1/channels/"+created.ChannelID+"/join", "", JoinChannelRequest{PairingToken: created.PairingToken, MinterPublicKeyJWK: alternatePublicJWK}, &rawJoin)
+	if status != http.StatusCreated || errCode != "" {
+		t.Fatalf("minter join status/error = %d/%q, want 201", status, errCode)
+	}
+	if _, ok := rawJoin["mintRequest"]; ok {
+		t.Fatalf("join of a channel created without a mint request returned one: %s", rawJoin["mintRequest"])
+	}
+}
+
+func TestCreateMintRequestValidation(t *testing.T) {
+	env := newTestEnv(t)
+	cases := map[string]struct {
+		role        string
+		mintRequest json.RawMessage
+	}{
+		"not an object":       {roleBrowser, json.RawMessage(`["msg"]`)},
+		"oversized":           {roleBrowser, json.RawMessage(`{"requestMessageId":"` + strings.Repeat("a", maxMintRequestBytes) + `"}`)},
+		"minter creator sent": {roleMinter, json.RawMessage(`{"v":1,"requestMessageId":"msg_x"}`)},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			var body CreateChannelRequest
+			headers := map[string]string{}
+			if tc.role == roleBrowser {
+				body = browserCreateBody()
+				headers["Origin"] = testSiteOrigin
+			} else {
+				body = CreateChannelRequest{Algorithm: algorithm, MinterPublicKeyJWK: testPublicJWK, IdleTTLSeconds: 15}
+			}
+			body.MintRequest = tc.mintRequest
+			status, errCode := postJSONWithHeaders(t, env.broker, "198.51.100.7:4321", "/v1/channels", headers, body, nil)
+			if status != http.StatusBadRequest || errCode != "invalid_request" {
+				t.Fatalf("create status/error = %d/%q, want 400/invalid_request", status, errCode)
+			}
+		})
+	}
+}
+
+// A minter that joins late, while the site's page is suspended and sends
+// nothing, still gets a full idle TTL to ask the owner: the join renews the
+// deadline (play#17 review F1).
+func TestLateMinterJoinRenewsTheDeadline(t *testing.T) {
+	env := newTestEnv(t)
+	created := createBrowserChannel(t, env, false)
+
+	*env.clock = env.clock.Add(14 * time.Second) // 1 s before the create-time deadline
+	var joined JoinChannelResponse
+	status, errCode := postJSON(t, env.server.URL+"/v1/channels/"+created.ChannelID+"/join", "", JoinChannelRequest{PairingToken: created.PairingToken, MinterPublicKeyJWK: alternatePublicJWK}, &joined)
+	if status != http.StatusCreated || errCode != "" {
+		t.Fatalf("late join status/error = %d/%q, want 201", status, errCode)
+	}
+	if want := formatTime(env.clock.Add(15 * time.Second)); joined.ExpiresAt != want {
+		t.Fatalf("late join expiresAt = %s, want %s", joined.ExpiresAt, want)
+	}
+
+	// Past the create-time deadline, inside the renewed one: the minter can
+	// still deliver to the suspended page.
+	*env.clock = env.clock.Add(10 * time.Second)
+	appendMessage(t, env, created.ChannelID, joined.MinterToken, AppendMessageRequest{
+		MessageID:          "msg_result",
+		Sender:             roleMinter,
+		Recipient:          roleBrowser,
+		Algorithm:          algorithm,
+		AAD:                "aad",
+		Nonce:              "nonce",
+		Ciphertext:         "ciphertext",
+		SenderPublicKeyJWK: alternatePublicJWK,
+	})
 }

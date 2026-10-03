@@ -117,8 +117,11 @@ expiresAt = lastMessageAt + idleTtlSeconds
 On channel creation, `lastMessageAt` is initialized to `createdAt` so a channel
 without any messages still expires. On every accepted message append, the broker
 updates `lastMessageAt` and `expiresAt` in the same durable transaction that
-stores the message. Polls, reads, short-code lookups, and failed auth attempts do
-not extend TTL.
+stores the message. A successful join renews them the same way, once: it spends
+the pairing credential, so it cannot be repeated to keep a channel alive, and a
+minter that asks the owner from the site's announced request has sent no
+message yet when it starts the approval wait. Polls, reads, short-code lookups,
+and failed auth attempts do not extend TTL.
 
 Expired channels reject new messages. Cleanup may either delete expired records
 or mark them expired first, but the decision must be persisted in bbolt.

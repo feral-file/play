@@ -138,6 +138,12 @@ describe("requestEphemeralSession", () => {
       browserPublicKeyJwk: expect.objectContaining({ kty: "EC", crv: "P-256" }) as unknown,
       origin: testOrigin,
       browserInfo: expect.objectContaining({ name: "Test Browser", label: "Test Gallery" }) as unknown,
+      mintRequest: {
+        v: 1,
+        requestMessageId: expect.stringMatching(/^msg_/) as unknown,
+        supportsPersistentSessions: true,
+        requestedAt: expect.any(String) as unknown
+      },
       idleTtlSeconds: 300,
       shortCodeRequested: true
     });
@@ -148,7 +154,7 @@ describe("requestEphemeralSession", () => {
       "GET https://pairing.example/v1/channels/ch_1/messages?afterSeq=0",
       "GET https://pairing.example/v1/channels/ch_1/messages?afterSeq=0",
       "POST https://pairing.example/v1/channels/ch_1/messages",
-      "GET https://pairing.example/v1/channels/ch_1/messages?afterSeq=1"
+      "GET https://pairing.example/v1/channels/ch_1/messages?afterSeq=0"
     ]);
     expect(broker.closed).toEqual([]);
   });
@@ -292,6 +298,67 @@ describe("requestEphemeralSession", () => {
     expect(broker.closed).toEqual(["ch_1"]);
   });
 
+  it("collects a session the Art Computer delivered while the page was suspended past its local deadline", async () => {
+    // The device joined and answered the announced request while the page
+    // slept; the broker renewed the channel. The page wakes 16 s after a 15 s
+    // channel was created and must read the result, not abandon the channel.
+    const broker = await fakeBroker({ answersFromCreate: true, waitingPolls: 0 });
+    const storage = memoryStorage();
+    const realNow = Date.now.bind(Date);
+    let skewMs = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + skewMs);
+    const session = await requestEphemeralSession(baseOptions(broker.fetchImpl, {
+      idleTtlSeconds: 15,
+      storage: { storage },
+      onPairingMaterial: () => {
+        skewMs = 16_000;
+      }
+    }));
+    expect(session.token).toBe("browser-session-token-secret");
+    expect(storage.entries.has(ephemeralBrowserSessionStorageKey(testOrigin))).toBe(true);
+    expect(broker.closed).toEqual([]);
+    expect(broker.channels).toHaveLength(1);
+  });
+
+  it("does the final peer check after a poll that stalled until the local deadline", async () => {
+    // The first poll hangs; the device joins and delivers meanwhile. When the
+    // deadline aborts the hung poll, the page must look once more, not delete
+    // the channel with an approved session on it.
+    const broker = await fakeBroker({ answersFromCreate: true, waitingPolls: 0, stalledPolls: 1 });
+    const realNow = Date.now.bind(Date);
+    let skewMs = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + skewMs);
+    const session = await requestEphemeralSession(baseOptions(broker.fetchImpl, {
+      idleTtlSeconds: 15,
+      channelRegenerations: 0,
+      onPairingMaterial: () => {
+        skewMs = 14_980; // the hung poll is cut off ~20 ms later
+      }
+    }));
+    expect(session.token).toBe("browser-session-token-secret");
+    expect(broker.closed).toEqual([]);
+    expect(broker.channels).toHaveLength(1);
+  });
+
+  it("abandons a channel the device never joined once a page wakes past its local deadline", async () => {
+    const broker = await fakeBroker({ waitingPolls: Number.MAX_SAFE_INTEGER });
+    const realNow = Date.now.bind(Date);
+    let skewMs = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + skewMs);
+    const error = await captureError(requestEphemeralSession(baseOptions(broker.fetchImpl, {
+      idleTtlSeconds: 15,
+      channelRegenerations: 0,
+      onPairingMaterial: () => {
+        skewMs = 16_000;
+      }
+    })));
+    expect((error as PlayError).code).toBe("pairing_code_expired");
+    // One last look at the broker before giving the channel up.
+    const polls = broker.requests.filter((request) => request.url.includes("/messages?"));
+    expect(polls.length).toBeGreaterThanOrEqual(1);
+    expect(broker.closed).toEqual(["ch_1"]);
+  });
+
   it("replaces an expired channel with a fresh one and fresh pairing material", async () => {
     const broker = await fakeBroker({ expiredChannels: 1 });
     const materials: PairingMaterial[] = [];
@@ -414,6 +481,40 @@ describe("requestEphemeralSession", () => {
     expect(mintRequest).not.toHaveProperty("requestedExpiresInSeconds");
   });
 
+  it("announces the mint request at create under the id its encrypted copy carries", async () => {
+    const broker = await fakeBroker();
+    await requestEphemeralSession(baseOptions(broker.fetchImpl, { requestedExpiresInSeconds: 600 }));
+
+    const announced = broker.channels[0]?.createBody["mintRequest"] as Record<string, unknown> | undefined;
+    const sent = broker.mintRequests[0];
+    if (announced === undefined || sent === undefined) {
+      throw new Error("mint request was not announced and sent");
+    }
+    expect(announced).toEqual({
+      v: 1,
+      requestMessageId: sent.envelope["messageId"],
+      supportsPersistentSessions: true,
+      requestedExpiresInSeconds: 600,
+      requestedAt: sent.plaintext["requestedAt"]
+    });
+    expect(sent.plaintext["requestMessageId"]).toBe(announced["requestMessageId"]);
+  });
+
+  it("collects an answer the Art Computer gave from the announced request before the page sent its copy", async () => {
+    const broker = await fakeBroker({ answersFromCreate: true, waitingPolls: 2 });
+    const storage = memoryStorage();
+
+    const session = await requestEphemeralSession(baseOptions(broker.fetchImpl, { storage: { storage } }));
+
+    expect(session.token).toBe("browser-session-token-secret");
+    expect(storage.entries.has(ephemeralBrowserSessionStorageKey(testOrigin))).toBe(true);
+    // The encrypted copy still goes out for devices that predate announcing,
+    // and the answer is read from the start of the channel.
+    expect(broker.mintRequests).toHaveLength(1);
+    const urls = broker.requests.map((request) => `${request.init?.method ?? "GET"} ${request.url}`);
+    expect(urls.at(-1)).toBe("GET https://pairing.example/v1/channels/ch_1/messages?afterSeq=0");
+  });
+
   it("sends the maximum requested session lifetime", async () => {
     const { mintRequest } = await runMintFlow({ requestedExpiresInSeconds: maxRequestedExpiresInSeconds });
     expect(mintRequest["requestedExpiresInSeconds"]).toBe(31_536_000);
@@ -495,14 +596,27 @@ describe("requestEphemeralSession", () => {
       }
       return broker.fetchImpl(input, init);
     });
-    const error = await captureError(requestEphemeralSession(baseOptions(fetchImpl, {
+    // Every poll hangs, so the final peer check after the deadline also waits
+    // out its own bound; step the timers through it.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const state = { settled: false };
+    const pending = captureError(requestEphemeralSession(baseOptions(fetchImpl, {
       idleTtlSeconds: 15,
       onPairingMaterial: () => {
         // 10 ms of the channel's life left when the first poll starts.
         skewMs = 15_000 - 10;
       }
-    })));
+    }))).finally(() => {
+      state.settled = true;
+    });
+    for (let step = 0; step < 200 && !state.settled; step += 1) {
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    vi.useRealTimers();
+    const error = await pending;
     expect((error as PlayError).code).toBe("pairing_code_expired");
+    // Two polls: the one cut off at the deadline, then the bounded final check.
+    expect(fetchImpl.mock.calls.filter(([, init]) => (init?.method ?? "GET") === "GET")).toHaveLength(2);
   });
 
   it("times out with approval_timeout when a result poll stalls past maxWaitMs", async () => {
@@ -865,6 +979,33 @@ describe("displayDp1Playlist", () => {
       },
       fetchImpl
     })).rejects.not.toThrow("Private Playlist");
+  });
+
+  it("retries the cast once after a network failure", async () => {
+    let calls = 0;
+    const fetchImpl = vi.fn<typeof fetch>(() => {
+      calls += 1;
+      if (calls === 1) {
+        return Promise.reject(new TypeError("Failed to fetch"));
+      }
+      return Promise.resolve(jsonResponse({ message: { ok: true } }));
+    });
+    await displayDp1Playlist({
+      session: { token: "browser-session-token", sessionId: "sess_123", expiresAt: "2030-01-01T00:00:00.000Z", relayerBaseUrl: "https://relayer.example" },
+      playlist: { dpVersion: "1.1.0", title: "Browser Playlist", items: [] },
+      fetchImpl
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives up after a second network failure", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(() => Promise.reject(new TypeError("Failed to fetch")));
+    await expect(displayDp1Playlist({
+      session: { token: "browser-session-token", sessionId: "sess_123", expiresAt: "2030-01-01T00:00:00.000Z", relayerBaseUrl: "https://relayer.example" },
+      playlist: { dpVersion: "1.1.0", title: "Browser Playlist", items: [] },
+      fetchImpl
+    })).rejects.toThrow(TypeError);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
   it("requires a relayer URL", async () => {

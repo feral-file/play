@@ -101,6 +101,13 @@ Site-initiated request (browser creator):
   "browserPublicKeyJwk": { "kty": "EC", "crv": "P-256", "x": "...", "y": "..." },
   "origin": "https://www.artblocks.io",
   "browserInfo": { "name": "Art Blocks", "label": "artblocks.io", "userAgent": "..." },
+  "mintRequest": {
+    "v": 1,
+    "requestMessageId": "msg_...",
+    "supportsPersistentSessions": true,
+    "requestedExpiresInSeconds": 3600,
+    "requestedAt": "2026-09-25T20:55:00.000Z"
+  },
   "idleTtlSeconds": 300,
   "shortCodeRequested": true
 }
@@ -118,6 +125,18 @@ Rules for a browser creator:
   it, so a page on one site cannot present itself as another site in the
   approval sheet. The broker records the value on the channel.
 - `browserInfo` is optional, a JSON object of at most 8 KiB.
+- `mintRequest` is optional, a JSON object of at most 1 KiB, opaque to the
+  broker. It announces the mint request the site will send, so the joining
+  minter can ask the owner for approval as soon as it joins instead of when
+  the site's page next polls (a phone browser stops polling while the visitor
+  is in the Feral File app). The broker stores it and returns it only in the
+  minter's join response. It is not secret: the session the device returns
+  still travels end-to-end encrypted. A site that sends it still sends the
+  encrypted `mint_request`, with `requestMessageId` as its message id, once it
+  sees the minter: devices that predate announcing need it, and a device that
+  answered from the announcement ignores the copy. The page reads the result
+  from the start of the channel, since the answer can precede its own request.
+  It must be absent on a minter create.
 - Creates are rate limited per source host with the same window and thresholds
   as the short-code resolve aggregate limit (8 per minute, then a 5-minute
   lockout); over the limit is `429 rate_limited`. Minter creates are exempt.
@@ -229,8 +248,9 @@ Content-Type: application/json
 The joiner is always the opposite of `creatorRole`. The credential is exactly
 one of `pairingToken` or `shortCode`; short-code joins are rate limited per
 channel. A join consumes the pairing token and short code (`waiting` →
-`paired`); a second join is `401 unauthorized`. Sending the other role's key
-field is `400 invalid_request`.
+`paired`) and renews `expiresAt` to a full idle TTL from the join; a second
+join is `401 unauthorized`. Sending the other role's key field is
+`400 invalid_request`.
 
 Minter joining a browser-created channel (site-initiated):
 
@@ -253,10 +273,21 @@ when the browser created the channel. Response:
   "browserPublicKeyJwk": {},
   "origin": "https://www.artblocks.io",
   "browserInfo": {},
+  "mintRequest": {},
   "expiresAt": "2026-09-25T21:00:00.000Z",
   "nextSeq": 1
 }
 ```
+
+`mintRequest` is present only when the site sent one at create.
+
+Trust: on a site-created channel the broker is already the distributor of the
+browser's public key (the minter refuses an encrypted request under any other
+key, and encrypts the result to that key), so a minter that answers from the
+announcement trusts the broker for nothing new except the announced lifetime
+and the persistent-session capability. Those were end-to-end encrypted in the
+request; announced, the broker could alter them. The owner's approval on the
+sheet still decides, and the device still clamps the lifetime.
 
 Browser joining a minter-created channel (device-initiated, legacy):
 
@@ -285,7 +316,7 @@ Response:
 
 ### Send Message
 
-Used by both libraries. This is the only operation that extends channel TTL.
+Used by both libraries. Each accepted message extends channel TTL; the only other operation that does is a successful join, once.
 
 ```http
 POST /v1/channels/{channelId}/messages

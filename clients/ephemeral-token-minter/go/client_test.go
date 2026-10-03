@@ -712,6 +712,9 @@ type joinHarness struct {
 	// send endpoints report.
 	pollExpiresAt time.Time
 	sendExpiresAt time.Time
+	// createMetadata, when set, is the mint request metadata the join endpoint
+	// returns (the site sent it with its create call).
+	createMetadata json.RawMessage
 }
 
 func newJoinHarness(t *testing.T) *joinHarness {
@@ -754,7 +757,7 @@ func newJoinHarness(t *testing.T) *joinHarness {
 				writeJSON(t, w, map[string]string{"error": h.joinCode})
 				return
 			}
-			writeJSON(t, w, map[string]any{
+			joined := map[string]any{
 				"channelId":           "ch_site",
 				"role":                "minter",
 				"minterToken":         "mt_joined",
@@ -764,7 +767,11 @@ func newJoinHarness(t *testing.T) *joinHarness {
 				"browserInfo":         map[string]string{"name": "Art Blocks", "label": "artblocks.io", "userAgent": "test", "extra": "ignored"},
 				"expiresAt":           joinExpiry(h.joinExpiresAt),
 				"nextSeq":             1,
-			})
+			}
+			if h.createMetadata != nil {
+				joined["mintRequest"] = h.createMetadata
+			}
+			writeJSON(t, w, joined)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/channels/ch_site/messages":
 			if r.Header.Get("Authorization") != "Bearer mt_joined" {
 				t.Fatalf("poll authorization = %q", r.Header.Get("Authorization"))
@@ -1110,5 +1117,77 @@ func TestChannelExpiresAtConcurrentAccess(t *testing.T) {
 	}
 	if want := base.Add(8 * time.Second); !channel.ExpiresAt().Equal(want) {
 		t.Fatalf("ExpiresAt = %v, want the latest %v", channel.ExpiresAt(), want)
+	}
+}
+
+func TestJoinedMintRequestFromCreateMetadata(t *testing.T) {
+	h := newJoinHarness(t)
+	h.createMetadata = json.RawMessage(`{"v":1,"requestMessageId":"msg_site","requestedExpiresInSeconds":7200,"supportsPersistentSessions":true,"requestedAt":"2026-10-02T10:00:00Z"}`)
+	channel := h.join(t, JoinChannelOptions{ChannelID: "ch_site", PairingToken: "pt_secret"})
+
+	request, ok := channel.JoinedMintRequest()
+	if !ok {
+		t.Fatal("joined channel with request metadata reported no joined request")
+	}
+	if request.ChannelID != "ch_site" || request.MessageID != "msg_site" || request.Seq != 0 {
+		t.Fatalf("joined request identity = %#v", request)
+	}
+	if request.Origin != joinTestOrigin || request.BrowserInfo.Name != "Art Blocks" || !publicJWKMatches(request.BrowserPublicKeyJWK, h.browserJWK) {
+		t.Fatalf("joined request attested fields = %#v", request)
+	}
+	if request.RequestedExpiresInSeconds != 7200 || !request.SupportsPersistentSessions {
+		t.Fatalf("joined request lifetime/capability = %d/%t", request.RequestedExpiresInSeconds, request.SupportsPersistentSessions)
+	}
+
+	// The answer goes to the broker-attested browser key and names the site's
+	// request id, so the page matches it whether or not it ever sent its
+	// encrypted copy.
+	if _, err := channel.SendMintSuccess(context.Background(), request, MintResult{SessionID: "ses_1", Token: "eph_token", Persistent: true}); err != nil {
+		t.Fatal(err)
+	}
+	plaintext, _, err := decryptMessage(h.browserKey, h.sentMessages[0], channel.MinterPublicKeyJWK())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var success mintSuccessPlaintext
+	if err := json.Unmarshal(plaintext, &success); err != nil {
+		t.Fatal(err)
+	}
+	if success.RequestMessageID != "msg_site" || !success.Session.Persistent {
+		t.Fatalf("success = %#v", success)
+	}
+}
+
+func TestJoinedMintRequestAbsentOrUnreadable(t *testing.T) {
+	cases := map[string]json.RawMessage{
+		"absent":            nil,
+		"unknown version":   json.RawMessage(`{"v":2,"requestMessageId":"msg_site"}`),
+		"missing id":        json.RawMessage(`{"v":1}`),
+		"oversized id":      json.RawMessage(`{"v":1,"requestMessageId":"` + strings.Repeat("a", maxRequestMessageIDBytes+1) + `"}`),
+		"lifetime too long": json.RawMessage(`{"v":1,"requestMessageId":"msg_site","requestedExpiresInSeconds":31536001}`),
+		"lifetime fraction": json.RawMessage(`{"v":1,"requestMessageId":"msg_site","requestedExpiresInSeconds":1.5}`),
+	}
+	for name, metadata := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newJoinHarness(t)
+			h.createMetadata = metadata
+			channel := h.join(t, JoinChannelOptions{ChannelID: "ch_site", PairingToken: "pt_secret"})
+			if request, ok := channel.JoinedMintRequest(); ok {
+				t.Fatalf("joined request = %#v, want none", request)
+			}
+			// The encrypted request path is unchanged.
+			h.messages = []encryptedMessage{h.mintRequest(t, channel, h.browserKey, joinTestOrigin)}
+			request, err := channel.PollMintRequest(context.Background(), 0)
+			if err != nil || request == nil || request.MessageID != "msg_browser" {
+				t.Fatalf("poll after unreadable metadata = %#v, %v", request, err)
+			}
+		})
+	}
+}
+
+func TestJoinedMintRequestNotOnMinterCreatedChannel(t *testing.T) {
+	channel := &Channel{}
+	if _, ok := channel.JoinedMintRequest(); ok {
+		t.Fatal("a channel this minter created reported a joined request")
 	}
 }

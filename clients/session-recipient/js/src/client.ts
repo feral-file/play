@@ -450,12 +450,36 @@ function channelUrl(channel: BrowserChannel, suffix = ""): URL {
   return new URL(`/v1/channels/${encodeURIComponent(channel.channelId)}${suffix}`, channel.brokerBaseUrl);
 }
 
+/**
+ * The mint request as announced at create, so the Art Computer can ask its
+ * owner as soon as it joins: a phone browser stops polling while the visitor is
+ * in the app, and the encrypted request would otherwise wait for them to come
+ * back. Nothing here is secret; the session the device returns stays end-to-end
+ * encrypted. The origin, key and browser info are already on the channel.
+ */
+type AnnouncedMintRequest = {
+  requestMessageId: string;
+  requestedExpiresInSeconds: number | undefined;
+  requestedAt: string;
+};
+
+function announcedMintRequestToJsonValue(request: AnnouncedMintRequest): JsonValue {
+  return {
+    v: 1,
+    requestMessageId: request.requestMessageId,
+    supportsPersistentSessions: true,
+    ...(request.requestedExpiresInSeconds === undefined ? {} : { requestedExpiresInSeconds: request.requestedExpiresInSeconds }),
+    requestedAt: request.requestedAt
+  };
+}
+
 async function createChannel(input: {
   fetcher: typeof fetch;
   brokerBaseUrl: string;
   browserPublicKeyJwk: JsonWebKey;
   origin: string;
   browserInfo: BrowserInfo;
+  mintRequest: AnnouncedMintRequest;
   idleTtlSeconds: number;
   signal: AbortSignal | undefined;
 }): Promise<BrowserChannel> {
@@ -470,6 +494,7 @@ async function createChannel(input: {
       browserPublicKeyJwk: input.browserPublicKeyJwk,
       origin: input.origin,
       browserInfo: browserInfoToJsonValue(input.browserInfo),
+      mintRequest: announcedMintRequestToJsonValue(input.mintRequest),
       idleTtlSeconds: input.idleTtlSeconds,
       shortCodeRequested: true
     }),
@@ -613,6 +638,8 @@ const defaultResultPollIntervalMs = 5000;
 const peerPollFastIntervalMs = 1000;
 const peerPollSlowIntervalMs = 2000;
 const peerPollFastCount = 10;
+/** How long the last peer check after the local deadline may take. */
+const finalPeerCheckTimeoutMs = 10_000;
 
 function validateIdleTtlSeconds(value: number | undefined): number {
   if (value === undefined) {
@@ -665,33 +692,48 @@ type PairingContext = {
 /**
  * Waits for the Art Computer to join the channel and returns its public key.
  * Throws ChannelGoneError when the channel expires first.
+ *
+ * The local deadline is the create-time one, but the broker's can be later: a
+ * join renews it, and an Art Computer that answers the announced request can
+ * deliver the session while this page is suspended. So a page that wakes past
+ * its local deadline checks the broker once more before it gives the channel
+ * up, and only a channel the device never joined is abandoned on the clock.
  */
 async function waitForPeer(context: PairingContext, channel: BrowserChannel, localDeadline: number): Promise<ChannelPeer> {
   let polls = 0;
+  // Set when the deadline timer cut a poll off: the next pass is the final
+  // check whatever the clock reads.
+  let deadlineReached = false;
   for (;;) {
     throwIfAborted(context.signal);
-    if (Date.now() >= localDeadline) {
-      throw new ChannelGoneError();
-    }
+    const pastDeadline = deadlineReached || Date.now() >= localDeadline;
     let poll: PollMessagesResponse | undefined;
     // Bound each poll by the channel deadline too, so a stalled request cannot
-    // hold the dialog on an expired code.
+    // hold the dialog on an expired code; the last check gets a short bound of
+    // its own.
     const pollController = new AbortController();
     const onCancel = (): void => {
       pollController.abort();
     };
     context.signal?.addEventListener("abort", onCancel, { once: true });
-    const deadlineTimer = setTimeout(onCancel, Math.max(0, localDeadline - Date.now()));
+    const bound = pastDeadline ? finalPeerCheckTimeoutMs : localDeadline - Date.now();
+    const deadlineTimer = setTimeout(onCancel, Math.max(0, bound));
     try {
       poll = await pollMessages({ fetcher: context.fetcher, channel, afterSeq: 0, signal: pollController.signal });
     } catch (error) {
       throwIfAborted(context.signal);
-      if (pollController.signal.aborted) {
-        throw new ChannelGoneError();
-      }
-      if (!(error instanceof TypeError)) {
+      const cutOff = pollController.signal.aborted;
+      if (!cutOff && !(error instanceof TypeError)) {
         throw error;
       }
+      // A final check that stalls or fails ends the channel.
+      if (pastDeadline) {
+        throw new ChannelGoneError();
+      }
+      // Before the deadline a network failure is retried. A poll that stalled
+      // until the deadline falls through to the bounded final check: the
+      // device may have joined and delivered while it hung.
+      deadlineReached = cutOff;
     } finally {
       clearTimeout(deadlineTimer);
       context.signal?.removeEventListener("abort", onCancel);
@@ -699,24 +741,39 @@ async function waitForPeer(context: PairingContext, channel: BrowserChannel, loc
     if (poll?.peer !== undefined) {
       return poll.peer;
     }
+    if (pastDeadline) {
+      throw new ChannelGoneError();
+    }
+    if (deadlineReached) {
+      continue;
+    }
     polls += 1;
     const interval = context.pollIntervalMs ?? (polls < peerPollFastCount ? peerPollFastIntervalMs : peerPollSlowIntervalMs);
     await sleep(interval, context.signal);
   }
 }
 
-/** Sends the encrypted mint request to the joined Art Computer and waits for its answer. */
+/**
+ * Sends the encrypted mint request to the joined Art Computer and waits for its
+ * answer.
+ *
+ * An Art Computer that read the request announced at create may have answered
+ * already, while this page was in the background; one that predates it needs
+ * the encrypted request. So the request is always sent, under the announced
+ * message id (a device that answered ignores the copy), and the answer is read
+ * from the start of the channel rather than after the request.
+ */
 async function completeMint(input: {
   context: PairingContext;
   channel: BrowserChannel;
   peer: ChannelPeer;
   keyPair: CryptoKeyPair;
   browserPublicKeyJwk: JsonWebKey;
-  requestedExpiresInSeconds: number | undefined;
+  mintRequest: AnnouncedMintRequest;
   maxWaitMs: number;
 }): Promise<EphemeralBrowserSession> {
   const { context, channel, peer, keyPair, browserPublicKeyJwk } = input;
-  const requestMessageId = randomMessageId();
+  const { requestMessageId, requestedExpiresInSeconds, requestedAt } = input.mintRequest;
   const mintRequestPlaintext: JsonValue = {
     v: 1,
     type: "mint_request",
@@ -729,9 +786,9 @@ async function completeMint(input: {
     // device may send the owner-kept shape only to a requester that declared
     // this.
     supportsPersistentSessions: true,
-    ...(input.requestedExpiresInSeconds === undefined ? {} : { requestedExpiresInSeconds: input.requestedExpiresInSeconds }),
+    ...(requestedExpiresInSeconds === undefined ? {} : { requestedExpiresInSeconds }),
     browserPublicKeyJwk: browserPublicKeyJwk as unknown as JsonValue,
-    requestedAt: new Date().toISOString()
+    requestedAt
   };
   const encryptedRequest = await encryptChannelMessage({
     privateKey: keyPair.privateKey,
@@ -761,9 +818,8 @@ async function completeMint(input: {
   const deadlineTimer = setTimeout(abortApproval, Math.max(0, input.maxWaitMs));
   const timedOut = (): PlayError => new PlayError("poll timed out", "approval_timeout");
   try {
-    let sent: SendMessageResponse;
     try {
-      sent = await sendMintRequest({ fetcher: context.fetcher, channel, encrypted: encryptedRequest, signal: approvalController.signal });
+      await sendMintRequest({ fetcher: context.fetcher, channel, encrypted: encryptedRequest, signal: approvalController.signal });
     } catch (error) {
       throwIfAborted(context.signal);
       if (approvalController.signal.aborted) {
@@ -771,7 +827,8 @@ async function completeMint(input: {
       }
       throw error;
     }
-    let afterSeq = sent.seq;
+    // From the start: the answer can precede the request (see above).
+    let afterSeq = 0;
     while (Date.now() <= deadline) {
       throwIfAborted(context.signal);
       let poll: PollMessagesResponse;
@@ -854,9 +911,14 @@ export async function requestEphemeralSession(options: RequestEphemeralSessionOp
     // one it replaces.
     const keyPair = await generateBrowserKeyPair();
     const browserPublicKeyJwk = await exportPublicJwk(keyPair.publicKey);
+    const mintRequest: AnnouncedMintRequest = {
+      requestMessageId: randomMessageId(),
+      requestedExpiresInSeconds,
+      requestedAt: new Date().toISOString()
+    };
     let channel: BrowserChannel;
     try {
-      channel = await createChannel({ fetcher, brokerBaseUrl, browserPublicKeyJwk, origin, browserInfo, idleTtlSeconds, signal });
+      channel = await createChannel({ fetcher, brokerBaseUrl, browserPublicKeyJwk, origin, browserInfo, mintRequest, idleTtlSeconds, signal });
     } catch (error) {
       throw signal?.aborted === true ? canceledError() : error;
     }
@@ -880,7 +942,7 @@ export async function requestEphemeralSession(options: RequestEphemeralSessionOp
         peer,
         keyPair,
         browserPublicKeyJwk,
-        requestedExpiresInSeconds,
+        mintRequest,
         maxWaitMs: options.maxWaitMs ?? 300_000
       });
       // A cancel that lands while the result is decrypted still wins.
@@ -915,7 +977,8 @@ export async function displayDp1Playlist(options: DisplayDp1PlaylistOptions): Pr
     throw new Error("relayer base URL is required");
   }
 
-  const response = await fetcher(new URL("/api/cast", normalizeBaseUrl(relayerBaseUrl)), {
+  const castUrl = new URL("/api/cast", normalizeBaseUrl(relayerBaseUrl));
+  const init: RequestInit = {
     method: "POST",
     headers: {
       authorization: `Bearer ${options.session.token}`,
@@ -930,7 +993,19 @@ export async function displayDp1Playlist(options: DisplayDp1PlaylistOptions): Pr
         dp1_call: options.playlist
       }
     })
-  });
+  };
+  let response: Response;
+  try {
+    response = await fetcher(castUrl, init);
+  } catch (error) {
+    // A page returning to the foreground can lose its first request to a
+    // network that is still waking up. One retry covers that; a second
+    // failure is real. Re-sending is safe: the cast replaces what is showing.
+    if (!(error instanceof TypeError)) {
+      throw error;
+    }
+    response = await fetcher(castUrl, init);
+  }
 
   if (response.status === 401 || response.status === 403) {
     throw new PlayError("browser session rejected", "session_rejected");
