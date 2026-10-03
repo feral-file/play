@@ -864,6 +864,9 @@ export async function requestEphemeralSession(options: RequestEphemeralSessionOp
     // its lifetime.
     const localDeadline = Date.now() + idleTtlSeconds * 1000;
     try {
+      // A cancel that lands while the create call resolves must not hand out a
+      // live link and code; throwing here closes the channel below.
+      throwIfAborted(signal);
       options.onPairingMaterial?.({
         appLink: buildAppLink(appLinkBaseUrl, channel.channelId, channel.pairingToken),
         shortCode: channel.shortCode,
