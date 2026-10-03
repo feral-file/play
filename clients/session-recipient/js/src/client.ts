@@ -701,9 +701,12 @@ type PairingContext = {
  */
 async function waitForPeer(context: PairingContext, channel: BrowserChannel, localDeadline: number): Promise<ChannelPeer> {
   let polls = 0;
+  // Set when the deadline timer cut a poll off: the next pass is the final
+  // check whatever the clock reads.
+  let deadlineReached = false;
   for (;;) {
     throwIfAborted(context.signal);
-    const pastDeadline = Date.now() >= localDeadline;
+    const pastDeadline = deadlineReached || Date.now() >= localDeadline;
     let poll: PollMessagesResponse | undefined;
     // Bound each poll by the channel deadline too, so a stalled request cannot
     // hold the dialog on an expired code; the last check gets a short bound of
@@ -719,15 +722,18 @@ async function waitForPeer(context: PairingContext, channel: BrowserChannel, loc
       poll = await pollMessages({ fetcher: context.fetcher, channel, afterSeq: 0, signal: pollController.signal });
     } catch (error) {
       throwIfAborted(context.signal);
-      if (pollController.signal.aborted) {
-        throw new ChannelGoneError();
-      }
-      if (!(error instanceof TypeError)) {
+      const cutOff = pollController.signal.aborted;
+      if (!cutOff && !(error instanceof TypeError)) {
         throw error;
       }
+      // A final check that stalls or fails ends the channel.
       if (pastDeadline) {
         throw new ChannelGoneError();
       }
+      // Before the deadline a network failure is retried. A poll that stalled
+      // until the deadline falls through to the bounded final check: the
+      // device may have joined and delivered while it hung.
+      deadlineReached = cutOff;
     } finally {
       clearTimeout(deadlineTimer);
       context.signal?.removeEventListener("abort", onCancel);
@@ -737,6 +743,9 @@ async function waitForPeer(context: PairingContext, channel: BrowserChannel, loc
     }
     if (pastDeadline) {
       throw new ChannelGoneError();
+    }
+    if (deadlineReached) {
+      continue;
     }
     polls += 1;
     const interval = context.pollIntervalMs ?? (polls < peerPollFastCount ? peerPollFastIntervalMs : peerPollSlowIntervalMs);

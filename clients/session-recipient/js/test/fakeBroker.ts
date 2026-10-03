@@ -73,6 +73,8 @@ export type FakeBrokerOptions = {
    * as soon as it joins and before the page sends its encrypted copy (play#17).
    */
   answersFromCreate?: boolean;
+  /** The first N message polls hang until the caller aborts them. */
+  stalledPolls?: number;
 };
 
 export type CreatedChannel = {
@@ -102,6 +104,7 @@ export async function fakeBroker(options: FakeBrokerOptions = {}) {
   const closed: string[] = [];
   const pollsByChannel = new Map<string, number>();
   let networkFailures = options.networkFailures ?? 0;
+  let stalledPolls = options.stalledPolls ?? 0;
 
   function channelFor(url: string): CreatedChannel {
     const match = /\/v1\/channels\/([^/?]+)/.exec(url);
@@ -229,6 +232,15 @@ export async function fakeBroker(options: FakeBrokerOptions = {}) {
       return jsonResponse({ channelId: channel.channelId, seq, expiresAt: "2030-01-01T00:00:00.000Z" }, 201);
     }
     if (method === "GET" && url.includes("/messages?")) {
+      if (stalledPolls > 0) {
+        stalledPolls -= 1;
+        const signal = init?.signal;
+        return new Promise<Response>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => {
+            reject(new DOMException("aborted", "AbortError"));
+          }, { once: true });
+        });
+      }
       const channelNumber = channels.indexOf(channel) + 1;
       if (channelNumber <= (options.expiredChannels ?? 0)) {
         return jsonResponse({ error: "expired" }, 410);

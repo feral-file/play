@@ -320,6 +320,26 @@ describe("requestEphemeralSession", () => {
     expect(broker.channels).toHaveLength(1);
   });
 
+  it("does the final peer check after a poll that stalled until the local deadline", async () => {
+    // The first poll hangs; the device joins and delivers meanwhile. When the
+    // deadline aborts the hung poll, the page must look once more, not delete
+    // the channel with an approved session on it.
+    const broker = await fakeBroker({ answersFromCreate: true, waitingPolls: 0, stalledPolls: 1 });
+    const realNow = Date.now.bind(Date);
+    let skewMs = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + skewMs);
+    const session = await requestEphemeralSession(baseOptions(broker.fetchImpl, {
+      idleTtlSeconds: 15,
+      channelRegenerations: 0,
+      onPairingMaterial: () => {
+        skewMs = 14_980; // the hung poll is cut off ~20 ms later
+      }
+    }));
+    expect(session.token).toBe("browser-session-token-secret");
+    expect(broker.closed).toEqual([]);
+    expect(broker.channels).toHaveLength(1);
+  });
+
   it("abandons a channel the device never joined once a page wakes past its local deadline", async () => {
     const broker = await fakeBroker({ waitingPolls: Number.MAX_SAFE_INTEGER });
     const realNow = Date.now.bind(Date);
@@ -553,14 +573,27 @@ describe("requestEphemeralSession", () => {
       }
       return broker.fetchImpl(input, init);
     });
-    const error = await captureError(requestEphemeralSession(baseOptions(fetchImpl, {
+    // Every poll hangs, so the final peer check after the deadline also waits
+    // out its own bound; step the timers through it.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const state = { settled: false };
+    const pending = captureError(requestEphemeralSession(baseOptions(fetchImpl, {
       idleTtlSeconds: 15,
       onPairingMaterial: () => {
         // 10 ms of the channel's life left when the first poll starts.
         skewMs = 15_000 - 10;
       }
-    })));
+    }))).finally(() => {
+      state.settled = true;
+    });
+    for (let step = 0; step < 200 && !state.settled; step += 1) {
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    vi.useRealTimers();
+    const error = await pending;
     expect((error as PlayError).code).toBe("pairing_code_expired");
+    // Two polls: the one cut off at the deadline, then the bounded final check.
+    expect(fetchImpl.mock.calls.filter(([, init]) => (init?.method ?? "GET") === "GET")).toHaveLength(2);
   });
 
   it("times out with approval_timeout when a result poll stalls past maxWaitMs", async () => {
