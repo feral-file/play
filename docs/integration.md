@@ -266,10 +266,10 @@ that path for sites that have not upgraded. Upgrading from 0.3.x: drop the
 stop matching `pairing_code_not_found` and `pairing_code_used`, which a site
 can no longer hit. The wrapped button needs no change.
 
-Site-initiated pairing needs the Art Computer software and Feral File app
-releases that can join a site's channel; until those are out, 0.3.x is the
-version that pairs. The hosted broker, the mobile-app approval flow, and the
-FF1 display path are the same for both. One honest
+Site-initiated pairing needs Art Computer software 2.0.10 or later and a
+Feral File app with **Pair a site** in the Art Computer's settings; both are
+released. The hosted broker, the mobile-app approval flow, and the FF1 display
+path are the same for both directions. One honest
 caveat while this is pre-1.0: expect additive API change between 0.x versions.
 Sessions authorize the display/cast path only — that is by design, and the
 scope will stay narrow.
