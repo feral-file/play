@@ -117,11 +117,12 @@ Useful options (see `PlayOnArtComputerButtonOptions` in
   such a session fails with `relayer base URL is required`. Set it to the host
   in [Network endpoints](#network-endpoints).
 - `requestedExpiresInSeconds` — session lifetime your site asks for, a whole
-  number of seconds from 1 to 86400 (one day), the longest timed session the
-  Art Computer grants; it clamps to that, and a value outside the range throws
-  where you set it, stored session or not. Leave it unset to take the device
-  default. The device owner decides: if they keep your site paired, the request
-  is ignored and the session has no expiry.
+  number of seconds from 1 to 31536000; a value outside that throws where you
+  set it, stored session or not. The Art Computer clamps every timed session to
+  86400 seconds (one day), so a longer request gets one day, and the approval
+  sheet shows the clamped duration. Leave it unset to take the device default.
+  The device owner decides: if they keep your site paired, the request is
+  ignored and the session has no expiry.
 
 ## Custom UI path
 
