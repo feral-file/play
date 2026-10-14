@@ -3,13 +3,13 @@ alwaysApply: true
 ---
 # Review workflow rule
 
-This is the mandatory post-implementation gate. After any implementation, do not consider the work done until both paths are clear:
+Use deterministic verification and local fresh-context review as separate implementation signals for non-trivial changes:
 
-1. Deterministic check: server, JS, Flutter, integration, and Docker checks relevant to the change are clean and every reported issue is fixed.
-2. Inference check: the reviewer pool accepts the full diff against `main`.
+1. Deterministic check: server, JS, Flutter, integration, and Docker checks relevant to the change are clean or any blocker is reported accurately.
+2. Inference check: one fresh-context reviewer inspects the full diff against `main` using the local contract.
 
 1. **Handoff** - Produce a compact handoff: master purpose, recent implementation change, files changed, key decisions, checks run.
 2. **Diff** - Generate the review diff by comparing the branch to `main`, not only the latest commit or latest local edit.
-3. **Review pool** - Spawn 2-3 fresh-context `reviewer` subagents in parallel based on implementation complexity. Do not increase reviewer count because of test-only, doc-only, workflow-only, or dependency-only changes.
-4. **Inputs** - Give each reviewer the handoff, the diff against `main`, and any relevant test or lint output. Each reviewer follows `prompts/code-review.md` and ends with **Verdict: accept** or **Verdict: revise**.
-5. **If any Verdict: revise** - Collect all reviewer reports, merge valid findings into one action list, fix every valid issue, re-run deterministic checks, update the handoff, and send the updated diff against `main` back for another review round. Repeat until the full pool accepts.
+3. **Review** - Give one fresh-context `reviewer` the handoff, the diff against `main`, and any relevant test or lint output. The reviewer follows the generated contract in `prompts/code-review.md` and the repository context in `prompts/code-review.delta.md`.
+4. **Disposition** - The human change owner decides whether to fix each material finding, reject it with a reason, or accept it as risk.
+5. **Later reading** - If a material revision changes behavior, re-run deterministic checks and update the handoff. A later review may use fresh context and the full updated diff as another sensor reading; model acceptance is not a commit or merge gate.
