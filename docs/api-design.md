@@ -588,3 +588,34 @@ except for coarse transport state such as a closed channel.
   performs those integrations and passes final result payloads into the library.
 - The mint library does not send raw browser session tokens outside the E2EE
   broker response to the browser.
+
+## Alternative deployment: merged Cloudflare relayer
+
+`feral-file/ff-relayer#25` implements this `/v1/*` contract in a SQLite-backed
+Durable Object alongside an independent live relay. The server in this repo
+continues to use bbolt; selecting the Worker does not change that implementation.
+Both JavaScript and Go clients accept a broker base URL, so no cryptographic or
+wire-format change is needed for this deployment. The local example now exposes
+both broker and relayer URLs; a device-issued session's relayer URL remains
+authoritative for its credential.
+
+The Worker has additional bounded retention/capacity and admission controls;
+clients must surface HTTP 429/503 failures rather than assume unlimited channel
+creation or retention. Consult the Worker's protocol documentation for the
+current bounds. Do not import active bbolt channels into SQLite. Drain or expire
+them at a declared cutoff, keep the old service available for rollback, and
+restart interrupted pairing. Do not redirect credential-bearing broker requests
+to a different host during cutover.
+
+The merged broker's cross-language regression runner is
+`npm run test:play -- ../play` in ff-relayer (see its script usage).
+It substitutes Worker startup/storage for the Go server and exercises the actual
+JavaScript/Go exchange. The 2026-10-20 FF1 hardware test additionally exercised
+site-created pairing, app approval, browser casting and screenshot output.
+
+These checks preserve the legacy session result and `/api/cast` compatibility
+path. They do not implement the shared device-owned grant/E2EE control protocol
+from feral-file/feral-file#3551. Migrate JavaScript and Go result parsers together
+only when that protocol and its fixtures exist. Old browser tokens are not owner
+grants; keep production defaults and the compatibility service until staging
+verifies the complete new flow.

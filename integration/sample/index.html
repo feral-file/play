@@ -23,9 +23,13 @@
             <input
               id="broker-url"
               class="h-11 w-full rounded-md border border-neutral-800 bg-neutral-900 px-3 font-mono text-sm text-neutral-100 outline-none transition focus:border-red-400 focus:ring-2 focus:ring-red-500/20"
-              value="https://handoff.feralfile.com"
+              value="http://127.0.0.1:8787"
               autocomplete="off"
             />
+          </label>
+          <label class="block">
+            <span class="mb-2 block text-sm font-semibold text-neutral-300">Relayer URL</span>
+            <input id="relayer-url" class="h-11 w-full rounded-md border border-neutral-800 bg-neutral-900 px-3 font-mono text-sm text-neutral-100" value="http://127.0.0.1:8787" autocomplete="off" />
           </label>
           <label class="block">
             <span class="mb-2 block text-sm font-semibold text-neutral-300">App link base URL</span>
@@ -79,6 +83,10 @@
       } from "@feralfile/play";
 
       const brokerUrlInput = mustElement("broker-url");
+      const relayerUrlInput = mustElement("relayer-url");
+      // Local overrides belong to the sample, never to the distributable library.
+      relayerUrlInput.value = import.meta.env.VITE_RELAYER_URL || "http://127.0.0.1:8787";
+      brokerUrlInput.value = import.meta.env.VITE_BROKER_URL || relayerUrlInput.value;
       const appLinkBaseUrlInput = mustElement("app-link-base-url");
       const dp1PayloadInput = mustElement("dp1-payload");
       const forgetButton = mustElement("forget-session");
@@ -120,8 +128,8 @@
           playlist: dp1Payload,
           brokerBaseUrl: () => brokerUrlInput.value.trim(),
           appLinkBaseUrl: appLinkBaseUrlInput.value.trim(),
-          // Fallback when the session carries no relayer URL; the host from Network endpoints.
-          relayerBaseUrl: "https://tv-cast-coordination.autonomy-system.workers.dev",
+          // The device-issued session URL wins; never redirect its credential to another host.
+          relayerBaseUrl: () => relayerUrlInput.value.trim(),
           browserInfo: {
             name: navigator.userAgent.includes("Chrome") ? "Chrome" : "Browser",
             userAgent: navigator.userAgent,
