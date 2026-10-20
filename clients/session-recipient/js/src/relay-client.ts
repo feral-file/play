@@ -117,13 +117,16 @@ export class RelayClient {
     timeoutMs = 30000
   ): Promise<Record<string, unknown>> {
     const id = crypto.randomUUID();
-    const result = this.wait(`rpc:${id}`, timeoutMs);
+    const body = encoder.encode(JSON.stringify({ messageID: id, message: { command, request } }));
+    // Receipt credit is stop-and-wait. Budget up to one WAN round trip per
+    // chunk while preserving the caller's execution budget for ordinary RPCs.
+    const chunks = Math.ceil(body.length / CHUNK_SIZE);
+    const result = this.wait(`rpc:${id}`, timeoutMs + (chunks > 1 ? chunks * 1000 : 0));
     void result.catch(() => undefined);
     const work = this.sequence.then(async () => {
       await Promise.race([this.ready, result]);
       if (!this.pending.has(`rpc:${id}`)) throw new Error('Relay request expired');
       if (this.closed || !this.player) throw new Error('Player unavailable');
-      const body = encoder.encode(JSON.stringify({ messageID: id, message: { command, request } }));
       await this.send(body, this.player, () => this.pending.has(`rpc:${id}`));
     });
     this.sequence = work.catch(() => undefined);
@@ -269,7 +272,7 @@ export class RelayClient {
         next: 0,
         bytes: 0,
         parts: [],
-        expires: Date.now() + 30000,
+        expires: Date.now() + 180000,
       });
     const assembly = this.assemblies.get(from);
     if (
