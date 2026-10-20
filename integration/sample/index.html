@@ -1,171 +1,30 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>FF1 DP1 Mint Pairing Sample</title>
-    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
-  </head>
-  <body class="min-h-screen bg-neutral-950 text-neutral-100 antialiased">
-    <main class="grid min-h-screen grid-cols-[minmax(0,1fr)_360px] max-lg:grid-cols-1">
-      <section class="flex min-h-screen flex-col gap-5 border-r border-neutral-800 p-5 max-lg:border-r-0">
-        <div class="flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <p class="text-xs font-semibold uppercase tracking-normal text-red-400">NFT display website sample</p>
-            <h1 class="mt-2 text-3xl font-semibold tracking-normal text-neutral-50">FF1 DP1 playback</h1>
-          </div>
-          <div id="play-button-container"></div>
-        </div>
-
-        <div class="grid max-w-2xl gap-4">
-          <label class="block">
-            <span class="mb-2 block text-sm font-semibold text-neutral-300">Broker URL</span>
-            <input
-              id="broker-url"
-              class="h-11 w-full rounded-md border border-neutral-800 bg-neutral-900 px-3 font-mono text-sm text-neutral-100 outline-none transition focus:border-red-400 focus:ring-2 focus:ring-red-500/20"
-              value="http://127.0.0.1:8787"
-              autocomplete="off"
-            />
-          </label>
-          <label class="block">
-            <span class="mb-2 block text-sm font-semibold text-neutral-300">Relayer URL</span>
-            <input id="relayer-url" class="h-11 w-full rounded-md border border-neutral-800 bg-neutral-900 px-3 font-mono text-sm text-neutral-100" value="http://127.0.0.1:8787" autocomplete="off" />
-          </label>
-          <label class="block">
-            <span class="mb-2 block text-sm font-semibold text-neutral-300">App link base URL</span>
-            <input
-              id="app-link-base-url"
-              class="h-11 w-full rounded-md border border-neutral-800 bg-neutral-900 px-3 font-mono text-sm text-neutral-100 outline-none transition focus:border-red-400 focus:ring-2 focus:ring-red-500/20"
-              value="https://link.feralfile.com/pair"
-              autocomplete="off"
-            />
-          </label>
-        </div>
-
-        <label class="flex min-h-[420px] flex-1 flex-col">
-          <span class="mb-2 block text-sm font-semibold text-neutral-300">DP1 payload</span>
-          <textarea
-            id="dp1-payload"
-            class="min-h-[360px] flex-1 resize-y rounded-md border border-neutral-800 bg-neutral-900 p-4 font-mono text-sm leading-6 text-neutral-100 outline-none transition placeholder:text-neutral-600 focus:border-red-400 focus:ring-2 focus:ring-red-500/20"
-            placeholder='{"version":"1.0","items":[]}'
-            spellcheck="false"
-            autocomplete="off"
-            required
-          ></textarea>
-        </label>
-
-        <div class="rounded-md border border-neutral-800 bg-neutral-900 p-4">
-          <span class="block text-xs font-semibold uppercase tracking-normal text-neutral-500">Browser session</span>
-          <strong id="session-status" class="mt-2 block text-lg text-neutral-50">Checking</strong>
-          <button
-            id="forget-session"
-            type="button"
-            class="mt-5 h-10 rounded-md border border-neutral-700 px-4 text-sm font-semibold text-neutral-200 transition hover:border-neutral-500 hover:bg-neutral-800"
-          >
-            Forget
-          </button>
-        </div>
-      </section>
-
-      <aside class="flex min-h-screen flex-col justify-between bg-neutral-900 p-5 max-lg:min-h-0" aria-live="polite">
-        <div>
-          <span class="block text-xs font-semibold uppercase tracking-normal text-neutral-500">Status</span>
-          <p id="message" class="mt-2 text-sm font-medium leading-6 text-neutral-300"></p>
-        </div>
-      </aside>
-    </main>
-
-    <script type="module">
-      import {
-        clearStoredEphemeralBrowserSession,
-        hasStoredEphemeralBrowserSession,
-        mountPlayOnArtComputerButton
-      } from "@feralfile/play";
-
-      const brokerUrlInput = mustElement("broker-url");
-      const relayerUrlInput = mustElement("relayer-url");
-      // Local overrides belong to the sample, never to the distributable library.
-      relayerUrlInput.value = import.meta.env.VITE_RELAYER_URL || "http://127.0.0.1:8787";
-      brokerUrlInput.value = import.meta.env.VITE_BROKER_URL || relayerUrlInput.value;
-      const appLinkBaseUrlInput = mustElement("app-link-base-url");
-      const dp1PayloadInput = mustElement("dp1-payload");
-      const forgetButton = mustElement("forget-session");
-      const sessionStatus = mustElement("session-status");
-      const message = mustElement("message");
-
-      function mustElement(id) {
-        const element = document.getElementById(id);
-        if (element === null) {
-          throw new Error(`missing element: ${id}`);
-        }
-        return element;
-      }
-
-      function setMessage(value) {
-        message.textContent = value;
-      }
-
-      function updateSessionStatus() {
-        sessionStatus.textContent = hasStoredEphemeralBrowserSession(localStorage, window.location.origin) ? "Paired" : "Not paired";
-      }
-
-      function dp1Payload() {
-        try {
-          return JSON.parse(dp1PayloadInput.value.trim());
-        } catch {
-          throw new Error("DP1 payload must be valid JSON");
-        }
-      }
-
-      let playButton;
-
-      function mountPlayButton() {
-        const previous = playButton;
-        // Mount first: an invalid app link base URL throws here and leaves the
-        // current button in place.
-        playButton = mountPlayOnArtComputerButton({
-          container: "#play-button-container",
-          playlist: dp1Payload,
-          brokerBaseUrl: () => brokerUrlInput.value.trim(),
-          appLinkBaseUrl: appLinkBaseUrlInput.value.trim(),
-          // The device-issued session URL wins; never redirect its credential to another host.
-          relayerBaseUrl: () => relayerUrlInput.value.trim(),
-          browserInfo: {
-            name: navigator.userAgent.includes("Chrome") ? "Chrome" : "Browser",
-            userAgent: navigator.userAgent,
-            label: document.title
-          },
-          maxWaitMs: 300000,
-          onStatusChange: (value) => {
-            setMessage(value);
-            updateSessionStatus();
-          },
-          onSuccess: updateSessionStatus,
-          onError: updateSessionStatus
-        });
-        previous?.destroy();
-      }
-
-      // The app link base URL is fixed when the button mounts, so remount on change.
-      appLinkBaseUrlInput.addEventListener("change", () => {
-        try {
-          mountPlayButton();
-          setMessage("App link base URL updated.");
-        } catch (error) {
-          setMessage(error instanceof Error ? error.message : "Invalid app link base URL.");
-        }
-      });
-
-      mountPlayButton();
-
-      forgetButton.addEventListener("click", () => {
-        clearStoredEphemeralBrowserSession(localStorage, window.location.origin);
-        updateSessionStatus();
-        setMessage("Stored session cleared.");
-      });
-
-      updateSessionStatus();
-      setMessage("Ready.");
-    </script>
-  </body>
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Play on Art Computer</title>
+  <style>
+    body { max-width: 760px; margin: 48px auto; padding: 24px; font: 16px system-ui; background: #181818; color: #eee; }
+    label { display: block; margin: 24px 0; } input, textarea { box-sizing: border-box; display: block; width: 100%; padding: 12px; margin-top: 8px; color: inherit; background: #292929; border: 1px solid #666; border-radius: 6px; }
+    button { padding: 12px 20px; border: 0; border-radius: 6px; background: #b8e7ff; color: #111; cursor: pointer; } button:disabled { opacity: .5; }
+  </style>
+</head>
+<body>
+  <h1>Play on Art Computer</h1>
+  <label>Device ID<input id="device-id" placeholder="FF1-XXXXXXXX" autocomplete="off"></label>
+  <label>Relayer endpoint<input id="relayer-url" type="url"></label>
+  <label>DP-1 playlist<textarea id="playlist" rows="14" spellcheck="false">{"dpVersion":"1.1.0","title":"Browser playlist","items":[]}</textarea></label>
+  <div id="play"></div>
+  <script type="module">
+    import { mountPlayOnArtComputerButton } from "@feralfile/play";
+    const endpoint = document.getElementById("relayer-url");
+    endpoint.value = import.meta.env.VITE_RELAYER_URL || "http://127.0.0.1:8787";
+    mountPlayOnArtComputerButton({
+      container: "#play",
+      deviceId: () => document.getElementById("device-id").value.trim(),
+      relayerBaseUrl: () => endpoint.value.trim(),
+      playlist: () => JSON.parse(document.getElementById("playlist").value)
+    });
+  </script>
+</body>
 </html>

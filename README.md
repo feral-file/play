@@ -1,3 +1,16 @@
+# Device-ID playback rollout
+
+Browser playback now addresses FF1 directly by its physical device ID over the
+PR #26 binary WebSocket transport. Browser pairing, approval, and stored token
+APIs have been removed from the browser entrypoint. See
+[the browser API](clients/session-recipient/js/README.md) and
+[the runnable sample](integration/sample/README.md).
+
+The standalone broker and Go minter sources below remain for independent broker
+maintenance; the updated app, CLI, and FF1 playback path do not call them.
+
+---
+
 # Play on Art Computer
 
 This repository contains everything behind the **Play on Art Computer** action:
