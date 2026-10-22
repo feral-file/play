@@ -1,6 +1,12 @@
 /** Maximum reconstructed command size, matching the FF1 command ingress. */
 const MAX_MESSAGE = 4 * 1024 * 1024;
+/** Total bytes held across all in-progress reassemblies, whatever their sender. */
+const MAX_ASSEMBLY_BYTES = 8 * 1024 * 1024;
 const CHUNK_SIZE = 32768;
+/** Per-chunk receipt budget added to a request deadline: one WAN round trip. */
+const CHUNK_BUDGET_MS = 1000;
+/** Relay v2 selector that fans one frame out to every other live peer. */
+const PEERS = 'peers';
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
 
@@ -10,8 +16,28 @@ function record(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-type Header = { v: 2; id: string; to: string; from?: string };
+/** base64 encodes in a loop; spreading a chunk into fromCharCode can exceed
+ * the engine's argument limit. */
+function base64(bytes: Uint8Array): string {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+/** RelayHeader is what a sender writes; the relay discards any `from` it sees. */
+export type RelayHeader = { v: 2; id: string; to: string; from?: string };
+/** ForwardedHeader is what a recipient reads: the relay always stamps `from`. */
+export type ForwardedHeader = { v: 2; id: string; to: string; from: string };
+/** PreparedRequest is one sealed envelope plus the check that pins its responder. */
+export type PreparedRequest = {
+  command: string;
+  request: Record<string, unknown>;
+  /** Required: resolves true only for a reply that verifies under the pinned
+   * device profile (ff1-control-v1 §4.2). There is no accept-all default. */
+  verify: (value: Record<string, unknown>) => Promise<boolean>;
+};
 type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => void };
+type Deadline = Pending & { extend: (ms: number) => void };
 type Assembly = {
   id: string;
   count: number;
@@ -40,7 +66,7 @@ export function relayURL(baseUrl: string, deviceId: string): string {
 }
 
 /** encodeRelayFrame leaves the application payload byte-for-byte intact. */
-export function encodeRelayFrame(header: Header, payload: Uint8Array): Uint8Array {
+export function encodeRelayFrame(header: RelayHeader, payload: Uint8Array): Uint8Array {
   const encoded = encoder.encode(JSON.stringify(header));
   if (encoded.length > 1024 || encoded.length + payload.length + 2 > 65536)
     throw new Error('Relay frame too large');
@@ -52,7 +78,7 @@ export function encodeRelayFrame(header: Header, payload: Uint8Array): Uint8Arra
 }
 
 /** decodeRelayFrame validates routing metadata before delivering application data. */
-export function decodeRelayFrame(frame: ArrayBuffer): { header: Header; payload: Uint8Array } {
+export function decodeRelayFrame(frame: ArrayBuffer): { header: ForwardedHeader; payload: Uint8Array } {
   if (frame.byteLength < 3 || frame.byteLength > 65536) throw new Error('Invalid relay frame');
   const size = new DataView(frame).getUint16(0);
   if (!size || size > 1024 || size + 2 > frame.byteLength) throw new Error('Invalid relay header');
@@ -64,12 +90,28 @@ export function decodeRelayFrame(frame: ArrayBuffer): { header: Header; payload:
     )
   )
     throw new Error('Invalid relay routing');
-  return { header: header as unknown as Header, payload: new Uint8Array(frame, size + 2) };
+  return { header: header as unknown as ForwardedHeader, payload: new Uint8Array(frame, size + 2) };
 }
 
-/** RelayClient carries existing JSON commands and notifications over relay v2.
+/** RelayClient carries sealed `ff1Envelope` commands over relay v2.
+ *
+ * EXPERIMENTAL: not used by the default Play API, which stays on mint pairing
+ * and the legacy relayer until browser display grants are defined.
+ *
  * Only an endpoint-verified reply can select a candidate. Receipt ACKs are
  * transport credit, never grant acceptance or command success.
+ *
+ * Pre-pin fan-out: until a reply verifies, the client does not know which
+ * peer is FF1, so the first request goes out once as `to:"peers"` and the
+ * relay copies it to every live peer on the public device channel. Peers that
+ * join later get the same sealed bytes by unicast. Every peer, including
+ * strangers squatting on the channel, therefore sees that ciphertext and its
+ * size and timing. Integrity is unaffected (only FF1 can open or answer it),
+ * but it is metadata exposure and up to 35x relay traffic for that request.
+ * Once a reply verifies, later requests go only to the pinned peer.
+ *
+ * The client never subscribes to notifications: Play sessions do not receive
+ * sealed notifications (ff1-control-v1 §9), so non-RPC frames are dropped.
  */
 export class RelayClient {
   private nextFrameAt = 0;
@@ -77,14 +119,14 @@ export class RelayClient {
   private socket: WebSocket;
   private player: string | undefined;
   private peers = new Set<string>();
-  private pending = new Map<string, Pending>();
+  private pending = new Map<string, Deadline>();
+  private fanouts = new Set<string>();
   private validators = new Map<string, (value: Record<string, unknown>) => Promise<boolean>>();
   private assemblies = new Map<string, Assembly>();
   private closed = false;
   private sequence = Promise.resolve();
   private readiness!: Pending;
   private ready: Promise<void>;
-  onNotification?: (message: Record<string, unknown>) => void;
 
   /** Create a controller connection; request() waits for a player to arrive. */
   constructor(
@@ -114,57 +156,64 @@ export class RelayClient {
   /** requestPrepared seals only after connection and send-queue readiness.
    * The endpoint validator alone selects the responding device; unknown peers
    * may receive ciphertext but cannot settle a request with an unverified reply.
+   *
+   * timeoutMs bounds the wait for a verified reply. A chunked body extends it
+   * by one second per chunk for every send, because each chunk waits for its
+   * receipt before the next goes out.
    */
   async requestPrepared(
-    prepare: () => Promise<{
-      command: string;
-      request: Record<string, unknown>;
-      verify: (value: Record<string, unknown>) => Promise<boolean>;
-    }>,
+    prepare: () => Promise<PreparedRequest>,
     timeoutMs = 30000
   ): Promise<Record<string, unknown>> {
     const id = crypto.randomUUID();
+    const key = `rpc:${id}`;
     // Bound queue/open waits before allocating a replay counter or sealing.
-    const result = this.wait(`rpc:${id}`, timeoutMs);
+    const result = this.wait(key, timeoutMs);
     void result.catch(() => undefined);
     const work = this.sequence.then(async () => {
       await Promise.race([this.ready, result]);
-      if (!this.pending.has(`rpc:${id}`)) {
+      if (!this.pending.has(key)) {
         throw new Error('Relay request expired');
       }
       const prepared = await prepare();
-      if (!this.pending.has(`rpc:${id}`)) {
+      if (!this.pending.has(key)) {
         throw new Error('Relay request expired');
       }
-      this.validators.set(id, prepared.verify);
+      if (typeof prepared.verify !== 'function') throw new Error('V2 requires a reply verifier');
       if (prepared.command !== 'ff1Envelope') throw new Error('V2 requires a protected envelope');
+      this.validators.set(id, prepared.verify);
       const body = encoder.encode(
         JSON.stringify({
           messageID: id,
           message: { command: prepared.command, request: prepared.request },
         })
       );
-      const sent = new Set<string>();
-      while (this.pending.has(`rpc:${id}`) && !this.closed) {
-        // Presence can initially contain only another controller. Probe each
-        // new candidate once while discovery is pending, using the SAME sealed
-        // request so forwarded/replayed copies cannot execute twice.
-        const targets = (this.player ? [this.player] : [...this.peers]).filter((peer) => !sent.has(peer));
-        targets.forEach((peer) => sent.add(peer));
-        const queue = [...targets];
-        await Promise.allSettled(Array.from({length: Math.min(4, queue.length)}, async () => {
-          while (queue.length) {
-            const peer = queue.shift();
-            if (!peer) break;
-            try { await this.send(body, peer, () => this.pending.has(`rpc:${id}`)); }
-            catch { /* A failed candidate cannot prevent discovery of FF1. */ }
-          }
-        }));
-        if (this.pending.has(`rpc:${id}`)) await Promise.race([new Promise((resolve) => setTimeout(resolve, 100)), result.then(() => undefined, () => undefined)]);
+      const chunks = Math.ceil(body.length / CHUNK_SIZE);
+      const active = () => this.pending.has(key);
+      const deliver = async (to: string) => {
+        if (chunks > 1) this.pending.get(key)?.extend(chunks * CHUNK_BUDGET_MS);
+        try { await this.send(body, to, active); }
+        catch { /* A failed candidate cannot prevent discovery of FF1. */ }
+      };
+      if (this.player) {
+        await deliver(this.player);
+        return;
+      }
+      // One fan-out reaches every peer the relay knows, including any beyond
+      // this client's presence view. Later joiners get the SAME sealed
+      // request so forwarded/replayed copies cannot execute twice.
+      const sent = new Set(this.peers);
+      await deliver(PEERS);
+      while (active() && !this.closed && !this.player) {
+        for (const peer of [...this.peers].filter((candidate) => !sent.has(candidate))) {
+          sent.add(peer);
+          await deliver(peer);
+        }
+        if (active()) await Promise.race([new Promise((resolve) => setTimeout(resolve, 100)), result.then(() => undefined, () => undefined)]);
       }
     });
     this.sequence = work.catch(() => undefined);
-    void work.catch((error: unknown) => { this.settle(`rpc:${id}`, undefined, error as Error); });
+    void work.catch((error: unknown) => { this.settle(key, undefined, error as Error); });
     try {
       return await result as Record<string, unknown>;
     } finally {
@@ -179,6 +228,7 @@ export class RelayClient {
     this.readiness.reject(error);
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
+    this.fanouts.clear();
     this.assemblies.clear();
     this.validators.clear();
     this.socket.close();
@@ -187,10 +237,12 @@ export class RelayClient {
   /** wait owns one bounded transport or RPC deadline. */
   private wait(key: string, timeoutMs: number): Promise<unknown> {
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const expire = () => {
         this.pending.delete(key);
         reject(new Error('Relay response timeout'));
-      }, timeoutMs);
+      };
+      let deadline = Date.now() + timeoutMs;
+      let timer = setTimeout(expire, timeoutMs);
       this.pending.set(key, {
         resolve: (value) => {
           clearTimeout(timer);
@@ -199,6 +251,11 @@ export class RelayClient {
         reject: (error) => {
           clearTimeout(timer);
           reject(error);
+        },
+        extend: (ms) => {
+          clearTimeout(timer);
+          deadline += ms;
+          timer = setTimeout(expire, Math.max(0, deadline - Date.now()));
         },
       });
     });
@@ -213,7 +270,10 @@ export class RelayClient {
     else pending.resolve(value);
   }
 
-  /** send serializes chunks and waits for each receipt to respect relay credit. */
+  /** send serializes chunks and waits for each receipt to respect relay credit.
+   * A fan-out chunk proceeds on the first recipient's receipt, so peers that
+   * lag or refuse it do not hold up FF1.
+   */
   private async send(body: Uint8Array, to: string, active: () => boolean): Promise<void> {
     if (body.length > MAX_MESSAGE) throw new Error('Relay message too large');
     const transfer = crypto.randomUUID();
@@ -224,7 +284,7 @@ export class RelayClient {
       if (count > 1)
         part = encoder.encode(
           JSON.stringify({
-            relayChunk: { id: transfer, index, count, data: btoa(String.fromCharCode(...part)) },
+            relayChunk: { id: transfer, index, count, data: base64(part) },
           })
         );
       const id = crypto.randomUUID();
@@ -236,13 +296,18 @@ export class RelayClient {
         this.nextFrameAt = Date.now() + Math.max(20, Math.ceil(frame.byteLength * 1000 / 750000));
         const receipt = this.wait(`ack:${to}:${id}`, 5000);
         void receipt.catch(() => undefined);
+        if (to === PEERS) this.fanouts.add(id);
         try { this.socket.send(frame); }
         catch (error) { this.settle(`ack:${to}:${id}`, undefined, error as Error); }
         return { receipt };
       });
       this.frameWrites = write.then(() => undefined, () => undefined);
       const { receipt } = await write;
-      await receipt;
+      try {
+        await receipt;
+      } finally {
+        this.fanouts.delete(id);
+      }
     }
   }
 
@@ -257,9 +322,8 @@ export class RelayClient {
     }
     const { header, payload } = decodeRelayFrame(data);
     const from = header.from;
-    if (!from) return;
-    this.socket.send(JSON.stringify({ type: 'ack', from: header.from, id: header.id }));
-    if (!this.peers.has(from) || (this.player && header.from !== this.player)) {
+    this.socket.send(JSON.stringify({ type: 'ack', from, id: header.id }));
+    if (!this.peers.has(from) || (this.player && from !== this.player)) {
       return;
     }
     let body: Uint8Array | undefined;
@@ -277,28 +341,27 @@ export class RelayClient {
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
       message = parsed as Record<string, unknown>;
     } catch { return; }
-    const messageId = message["messageID"];
-    if (message['type'] === 'RPC' && typeof messageId === 'string') {
-      const verify = this.validators.get(messageId);
-      if (verify) {
-        void verify(message)
-          .then((accepted) => {
-            if (
-              accepted &&
-              this.peers.has(from) &&
-              this.pending.has(`rpc:${messageId}`)
-            ) {
-              this.player = header.from;
-              this.settle(`rpc:${messageId}`, message);
-            }
-          })
-          .catch(() => undefined);
-      }
-    } else {
-      if (header.from === this.player) {
-        this.onNotification?.(message);
-      }
-    }
+    const messageId = message['messageID'];
+    // Only RPC replies are consumed. Play never subscribes to notifications
+    // (§9), so anything else is dropped rather than surfaced.
+    if (message['type'] !== 'RPC' || typeof messageId !== 'string') return;
+    const verify = this.validators.get(messageId);
+    if (!verify) return;
+    void verify(message)
+      .then((accepted) => {
+        if (
+          accepted &&
+          this.peers.has(from) &&
+          (!this.player || this.player === from) &&
+          this.pending.has(`rpc:${messageId}`)
+        ) {
+          this.player = from;
+          // Other peers' frames are dropped from now on; free their buffers.
+          for (const peer of this.assemblies.keys()) if (peer !== from) this.assemblies.delete(peer);
+          this.settle(`rpc:${messageId}`, message);
+        }
+      })
+      .catch(() => undefined);
   }
 
   /** control keeps connection presence separate from command completion. */
@@ -317,14 +380,25 @@ export class RelayClient {
     if (!this.player && this.peers.size) {
       this.readiness.resolve(undefined);
     }
-    if (event['type'] === 'ack' && typeof event['from'] === 'string' && typeof event['id'] === 'string') this.settle(`ack:${event['from']}:${event['id']}`);
-    if (event['type'] === 'error' && typeof event['to'] === 'string' && typeof event['id'] === 'string' && typeof event['code'] === 'string')
-      this.settle(`ack:${event['to']}:${event['id']}`, undefined, new Error(`Relay: ${event['code']}`));
+    const id = event['id'];
+    if (typeof id !== 'string') return;
+    // Fan-out recipients ACK independently and the first releases the chunk.
+    // A single recipient's refusal is ignored; only an empty fan-out, reported
+    // with to:"peers", fails it.
+    const fanout = this.fanouts.has(id);
+    if (event['type'] === 'ack' && typeof event['from'] === 'string')
+      this.settle(fanout ? `ack:${PEERS}:${id}` : `ack:${event['from']}:${id}`);
+    if (event['type'] === 'error' && typeof event['to'] === 'string' && typeof event['code'] === 'string' && (!fanout || event['to'] === PEERS))
+      this.settle(`ack:${event['to']}:${id}`, undefined, new Error(`Relay: ${event['code']}`));
   }
 
-  /** assemble enforces one ordered 4 MiB transfer per selected player. */
+  /** assemble enforces one ordered transfer per peer, each at most 4 MiB, and
+   * at most 8 MiB held across all peers. Before a peer is pinned any channel
+   * member can start a transfer, so expired buffers are swept on every chunk.
+   * A single-frame payload (the usual sealed reply) bypasses reassembly.
+   */
   private assemble(from: string, payload: Uint8Array): Uint8Array | undefined {
-    const value = record(JSON.parse(decoder.decode(payload)))["relayChunk"];
+    const value = record(JSON.parse(decoder.decode(payload)))['relayChunk'];
     if (value === undefined) return payload;
     const chunk = record(value);
     if (
@@ -342,6 +416,8 @@ export class RelayClient {
       throw new Error('Invalid relay chunk');
     const bytes = Uint8Array.from(atob(chunk['data']), (char) => char.charCodeAt(0));
     if (!bytes.length || bytes.length > CHUNK_SIZE) throw new Error('Invalid chunk size');
+    const now = Date.now();
+    for (const [peer, held] of this.assemblies) if (now >= held.expires) this.assemblies.delete(peer);
     if (chunk['index'] === 0)
       this.assemblies.set(from, {
         id: chunk['id'],
@@ -349,17 +425,21 @@ export class RelayClient {
         next: 0,
         bytes: 0,
         parts: [],
-        expires: Date.now() + 180000,
+        expires: now + 180000,
       });
+    let total = 0;
+    for (const held of this.assemblies.values()) total += held.bytes;
     const assembly = this.assemblies.get(from);
     if (
       assembly?.id !== chunk['id'] ||
       assembly.count !== chunk['count'] ||
       assembly.next !== chunk['index'] ||
-      Date.now() >= assembly.expires ||
-      assembly.bytes + bytes.length > MAX_MESSAGE
-    )
+      assembly.bytes + bytes.length > MAX_MESSAGE ||
+      total + bytes.length > MAX_ASSEMBLY_BYTES
+    ) {
+      this.assemblies.delete(from);
       throw new Error('Invalid chunk sequence');
+    }
     assembly.parts.push(bytes);
     assembly.bytes += bytes.length;
     assembly.next++;

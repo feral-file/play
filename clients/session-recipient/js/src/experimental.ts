@@ -9,4 +9,5 @@
  * version bump.
  */
 export { RelayClient, decodeRelayFrame, encodeRelayFrame, relayURL } from "./relay-client.js";
+export type { ForwardedHeader, PreparedRequest, RelayHeader } from "./relay-client.js";
 export { TemporaryChannel } from "./temporary-channel.js";

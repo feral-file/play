@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { test } from 'vitest';
+import { test, vi } from 'vitest';
 import {
   RelayClient,
   relayURL,
   encodeRelayFrame,
   decodeRelayFrame,
+  type PreparedRequest,
 } from '../src/relay-client.js';
 
 class Socket extends EventTarget {
@@ -184,7 +185,8 @@ test('discovers FF1 joining after another controller without resealing or resend
     const header = JSON.parse(new TextDecoder().decode(data.slice(2, 2+length))) as {to:string;id:string};
     const body = JSON.parse(new TextDecoder().decode(data.slice(2+length))) as {messageID:string};
     queueMicrotask(() => {
-      socket.message(JSON.stringify({type:'ack',from:header.to,id:header.id}));
+      // A fan-out is ACKed by each recipient under its own connection ID.
+      for (const peer of header.to === 'peers' ? ['other-controller'] : [header.to]) socket.message(JSON.stringify({type:'ack',from:peer,id:header.id}));
       if (header.to === 'ff1') {
         const frame = encodeRelayFrame({v:2,id:'verified',to:'cli',from:'ff1'},new TextEncoder().encode(JSON.stringify({type:'RPC',messageID:body.messageID})));
         socket.message(frame.buffer);
@@ -204,4 +206,132 @@ test('discovers FF1 joining after another controller without resealing or resend
   assert.equal(seals, 1);
   assert.equal(socket.sent.filter((data) => data instanceof Uint8Array).length, 2);
   client.close();
+});
+
+type Sent = { header: { to: string; id: string }; body: { messageID: string } };
+function sentFrames(socket: Socket): Sent[] {
+  return socket.sent.filter((data): data is Uint8Array => data instanceof Uint8Array).map((data) => {
+    const length = new DataView(data.buffer, data.byteOffset).getUint16(0);
+    return {
+      header: JSON.parse(new TextDecoder().decode(data.slice(2, 2 + length))) as Sent['header'],
+      body: JSON.parse(new TextDecoder().decode(data.slice(2 + length))) as Sent['body'],
+    };
+  });
+}
+async function nth(socket: Socket, index: number): Promise<Sent> {
+  // Frames are paced at least 20 ms apart, so a later frame needs a moment.
+  for (let tries = 0; tries < 50; tries++) {
+    const frame = sentFrames(socket)[index];
+    if (frame) return frame;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`frame ${String(index)} was never sent`);
+}
+function reply(socket: Socket, from: string, messageID: string, jwe: string) {
+  const frame = encodeRelayFrame({v:2,id:`reply-${from}`,to:'cli',from}, new TextEncoder().encode(JSON.stringify({type:'RPC',messageID,message:{v:1,jwe}})));
+  socket.message(frame.buffer);
+}
+// Deterministic stand-in for the devSig check: only FF1's reply verifies.
+const genuineOnly = (value: Record<string, unknown>) => Promise.resolve((value['message'] as {jwe?:unknown} | undefined)?.jwe === 'genuine');
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+test('first request fans out once to peers; later requests go only to the verified peer', async () => {
+  const socket = new Socket();
+  const client = new RelayClient('https://relay.test', 'FF1-TEST', () => socket as unknown as WebSocket);
+  socket.message(JSON.stringify({type:'hello', peers:['attacker','ff1']}));
+  const first = client.requestPrepared(() => Promise.resolve({command:'ff1Envelope', request:{v:1,jwe:'a'}, verify: genuineOnly}), 2000);
+  const fanout = await nth(socket, 0);
+  assert.equal(sentFrames(socket).length, 1);
+  assert.equal(fanout.header.to, 'peers');
+  // Recipients ACK independently; a refusal by one does not fail the frame.
+  socket.message(JSON.stringify({type:'error', code:'backpressure', id:fanout.header.id, to:'attacker'}));
+  socket.message(JSON.stringify({type:'ack', from:'ff1', id:fanout.header.id}));
+  reply(socket, 'ff1', fanout.body.messageID, 'genuine');
+  await first;
+  const second = client.requestPrepared(() => Promise.resolve({command:'ff1Envelope', request:{v:1,jwe:'b'}, verify: genuineOnly}), 2000);
+  const unicast = await nth(socket, 1);
+  assert.equal(unicast.header.to, 'ff1');
+  socket.message(JSON.stringify({type:'ack', from:'ff1', id:unicast.header.id}));
+  reply(socket, 'ff1', unicast.body.messageID, 'genuine');
+  await second;
+  assert.equal(sentFrames(socket).length, 2);
+  client.close();
+});
+
+test('a forged reply never settles a request or pins its sender', async () => {
+  const socket = new Socket();
+  const client = new RelayClient('https://relay.test', 'FF1-TEST', () => socket as unknown as WebSocket);
+  socket.message(JSON.stringify({type:'hello', peers:['attacker','ff1']}));
+  let settled = false;
+  const result = client.requestPrepared(() => Promise.resolve({command:'ff1Envelope', request:{v:1,jwe:'a'}, verify: genuineOnly}), 2000)
+    .then((value) => { settled = true; return value; });
+  const fanout = await nth(socket, 0);
+  socket.message(JSON.stringify({type:'ack', from:'attacker', id:fanout.header.id}));
+  reply(socket, 'attacker', fanout.body.messageID, 'forged');
+  await tick();
+  assert.equal(settled, false);
+  reply(socket, 'ff1', fanout.body.messageID, 'genuine');
+  assert.equal(((await result)['message'] as {jwe:string}).jwe, 'genuine');
+  client.close();
+});
+
+test('only a forged reply times the request out', async () => {
+  const socket = new Socket();
+  const client = new RelayClient('https://relay.test', 'FF1-TEST', () => socket as unknown as WebSocket);
+  socket.message(JSON.stringify({type:'hello', peers:['attacker']}));
+  const result = client.requestPrepared(() => Promise.resolve({command:'ff1Envelope', request:{v:1,jwe:'a'}, verify: genuineOnly}), 200);
+  const fanout = await nth(socket, 0);
+  socket.message(JSON.stringify({type:'ack', from:'attacker', id:fanout.header.id}));
+  reply(socket, 'attacker', fanout.body.messageID, 'forged');
+  await assert.rejects(result, /timeout/);
+  client.close();
+});
+
+test('a missing verifier is refused before anything is sent', async () => {
+  const socket = new Socket();
+  const client = new RelayClient('https://relay.test', 'FF1-TEST', () => socket as unknown as WebSocket);
+  socket.message(JSON.stringify({type:'hello', peers:['ff1']}));
+  const unverified = {command:'ff1Envelope', request:{v:1,jwe:'a'}} as unknown as PreparedRequest;
+  await assert.rejects(client.requestPrepared(() => Promise.resolve(unverified), 1000), /verifier/);
+  assert.equal(sentFrames(socket).length, 0);
+  client.close();
+});
+
+test('notifications are dropped: Play never subscribes (§9)', async () => {
+  const socket = new Socket();
+  const client = new RelayClient('https://relay.test', 'FF1-TEST', () => socket as unknown as WebSocket);
+  assert.equal('onNotification' in client, false);
+  socket.message(JSON.stringify({type:'hello', peers:['ff1']}));
+  const frame = encodeRelayFrame({v:2,id:'n1',to:'cli',from:'ff1'}, new TextEncoder().encode(JSON.stringify({v:1,jwe:'notification'})));
+  socket.message(frame.buffer);
+  await tick();
+  assert.equal(socket.closed, false);
+  client.close();
+});
+
+test('reassembly memory is capped across peers and expired buffers are swept', () => {
+  const socket = new Socket();
+  const client = new RelayClient('https://relay.test', 'FF1-TEST', () => socket as unknown as WebSocket);
+  const held = (client as unknown as {assemblies: Map<string, {bytes:number}>}).assemblies;
+  socket.message(JSON.stringify({type:'hello', peers:['a','b','c']}));
+  const data = Buffer.alloc(32768, 1).toString('base64');
+  const chunk = (from: string, index: number) => {
+    const payload = new TextEncoder().encode(JSON.stringify({relayChunk:{id:`t-${from}`,index,count:128,data}}));
+    socket.message(encodeRelayFrame({v:2,id:`${from}-${String(index)}`,to:'cli',from}, payload).buffer);
+  };
+  for (let index = 0; index < 127; index++) { chunk('a', index); chunk('b', index); }
+  chunk('c', 0);
+  chunk('c', 1);
+  assert.equal(held.get('c')?.bytes, 65536);
+  chunk('c', 2);
+  assert.equal(held.has('c'), false, 'a transfer past the 8 MiB total is dropped');
+  const now = Date.now();
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 181000);
+  try {
+    chunk('c', 0);
+    assert.deepEqual([...held.keys()], ['c']);
+  } finally {
+    clock.mockRestore();
+    client.close();
+  }
 });

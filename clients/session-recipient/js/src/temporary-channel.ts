@@ -103,7 +103,7 @@ export class TemporaryChannel {
       }
       const { header, payload } = decodeRelayFrame(data);
       this.socket.send(JSON.stringify({ type: 'ack', from: header.from, id: header.id }));
-      if (header.from) this.onPayload?.(header.from, payload);
+      this.onPayload?.(header.from, payload);
       return;
     }
     const raw: unknown = JSON.parse(data);
