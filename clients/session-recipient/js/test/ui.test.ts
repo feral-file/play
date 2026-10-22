@@ -185,27 +185,29 @@ async function waitFor(condition: () => boolean): Promise<void> {
 }
 
 describe("mountPlayOnArtComputerButton", () => {
-  it("sends by device ID without opening an authentication dialog", async () => {
+  it("reports the blocked secure integration without sending plaintext", async () => {
     vi.stubGlobal("WebSocket", class extends EventTarget {
       binaryType = "";
       close() { /* No network in this test. */ }
       send() { /* Adapter mocked below. */ }
     });
-    const request = vi.spyOn(RelayClient.prototype, "request").mockResolvedValue({ message: { ok: true } });
+    const request = vi.spyOn(RelayClient.prototype, "requestPrepared");
     vi.spyOn(RelayClient.prototype, "close").mockImplementation(() => undefined);
     const { document } = fakeDocumentWithContainer();
     const success = vi.fn();
+    const error = vi.fn();
     const handle = mountPlayOnArtComputerButton({
       container: "#play-button-container", document,
       deviceId: "FF1-TEST", relayerBaseUrl: "https://relay.example",
-      playlist: { title: "Browser Playlist", items: [] }, onSuccess: success
+      playlist: { title: "Browser Playlist", items: [] }, onSuccess: success, onError: error
     });
     handle.element.click();
-    await waitFor(() => success.mock.calls.length > 0);
-    expect(success).toHaveBeenCalledOnce();
-    expect(request).toHaveBeenCalledOnce();
+    await waitFor(() => error.mock.calls.length > 0);
+    expect(success).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledOnce();
+    expect(request).not.toHaveBeenCalled();
     expect(handle.element.disabled).toBe(false);
-    expect(handle.statusElement.textContent).toBe("Playlist sent to Art Computer.");
+    expect(handle.statusElement.textContent).toBe("Protected pairing and casting are not available in this build.");
     handle.destroy();
     vi.unstubAllGlobals();
   });

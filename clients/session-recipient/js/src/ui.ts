@@ -1,3 +1,4 @@
+import { PlayError } from "./errors.js";
 import { displayDp1Playlist, type Dp1Playlist } from "./client.js";
 
 export type ValueProvider<T> = T | (() => T | Promise<T>);
@@ -61,7 +62,9 @@ export function mountPlayOnArtComputerButton(options: PlayOnArtComputerButtonOpt
       setStatus("Playlist sent to Art Computer.");
       if (!isDestroyed()) options.onSuccess?.();
     } catch (error) {
-      setStatus("Could not send playlist to Art Computer.");
+      setStatus(error instanceof PlayError && error.code === "secure_integration_unavailable"
+        ? "Protected pairing and casting are not available in this build."
+        : "Could not send playlist to Art Computer.");
       if (!isDestroyed()) options.onError?.(error);
     } finally {
       button.disabled = false;

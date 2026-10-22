@@ -25,7 +25,7 @@ class Socket extends EventTarget {
 test('routes by device ID and rejects credential-bearing endpoints', () => {
   assert.equal(
     relayURL('https://relay.example', 'FF1-TEST'),
-    'wss://relay.example/v2/players/FF1-TEST/connections?role=controller'
+    'wss://relay.example/v2/channels/FF1-TEST/connections'
   );
   for (const endpoint of [
     'https://secret@relay.example',
@@ -45,7 +45,7 @@ test('RPC waits for device response, not the transport ACK', async () => {
   );
   socket.message(JSON.stringify({ type: 'hello', peers: ['player-1'] }));
   let finished = false;
-  const result = client.request('getDeviceStatus', {}).then((value) => {
+  const result = request(client, 'getDeviceStatus', {}).then((value) => {
     finished = true;
     return value;
   });
@@ -54,7 +54,7 @@ test('RPC waits for device response, not the transport ACK', async () => {
   const headerSize = new DataView(frame.buffer).getUint16(0);
   const header = JSON.parse(new TextDecoder().decode(frame.slice(2, 2 + headerSize))) as {id:string};
   const command = JSON.parse(new TextDecoder().decode(frame.slice(2 + headerSize))) as { messageID:string; message:{command:string} };
-  assert.equal(command.message.command, 'getDeviceStatus');
+  assert.equal(command.message.command, 'ff1Envelope');
   socket.message(JSON.stringify({ type: 'ack', from: 'player-1', id: header.id }));
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(finished, false);
@@ -76,7 +76,7 @@ test('disconnect rejects pending commands and malformed frames are bounded', asy
     'FF1-TEST',
     () => socket as unknown as WebSocket
   );
-  const pending = client.request('getDeviceStatus', {});
+  const pending = request(client, 'getDeviceStatus', {});
   client.close();
   await assert.rejects(pending, /closed/);
   assert.throws(() => decodeRelayFrame(new ArrayBuffer(65537)));
@@ -91,10 +91,10 @@ test('expired queued commands are never sent after transport credit is released'
     () => socket as unknown as WebSocket
   );
   socket.message(JSON.stringify({ type: 'hello', peers: ['player-1'] }));
-  const first = client.request('first', {}, 1000);
+  const first = request(client, 'first', {}, 1000);
   const firstRejected = assert.rejects(first);
   await new Promise((resolve) => setImmediate(resolve));
-  const second = client.request('expired', {}, 10);
+  const second = request(client, 'expired', {}, 10);
   await assert.rejects(second, /timed out|timeout/i);
   const frame = socket.sent[0] as Uint8Array;
   const size = new DataView(frame.buffer, frame.byteOffset).getUint16(0);
@@ -142,7 +142,7 @@ test('large transfers stay below the Worker byte ceiling with immediate ACKs', a
   );
   socket.message(JSON.stringify({ type: 'hello', peers: ['player-1'] }));
   try {
-    await client.request('displayPlaylist', { data: 'x'.repeat(2 * 1024 * 1024) });
+    await request(client, 'displayPlaylist', { data: 'x'.repeat(2 * 1024 * 1024) });
     for (const start of writes) {
       const bytes = writes
         .filter((write) => write.at >= start.at && write.at < start.at + 1000)
@@ -152,4 +152,56 @@ test('large transfers stay below the Worker byte ceiling with immediate ACKs', a
   } finally {
     client.close();
   }
+});
+
+// Synthetic endpoint seam tests transport only, not cryptography or enrollment.
+function request(client: RelayClient, _command: string, body: Record<string, unknown>, timeout = 30000) {
+	return client.requestPrepared(() => Promise.resolve({command: 'ff1Envelope', request: body, verify: () => Promise.resolve(true)}), timeout);
+}
+
+
+test('malformed reconstructed candidate payload is ACKed without closing a valid peer', () => {
+  const socket = new Socket();
+  const client = new RelayClient('https://relay.test', 'FF1-TEST', () => socket as unknown as WebSocket);
+  socket.message(JSON.stringify({type:'hello', peers:['attacker', 'ff1']}));
+  for (let index = 0; index < 2; index++) {
+    const payload = new TextEncoder().encode(JSON.stringify({relayChunk:{id:'bad-transfer',index,count:2,data:btoa('x')}}));
+    const frame = encodeRelayFrame({v:2,id:`bad-${String(index)}`,to:'cli',from:'attacker'},payload);
+    socket.message(frame.buffer);
+  }
+  assert.equal(socket.closed, false);
+  assert.equal(socket.sent.length, 2);
+  client.close();
+});
+
+
+test('discovers FF1 joining after another controller without resealing or resending', async () => {
+  const socket = new Socket();
+  socket.send = (data: unknown) => {
+    socket.sent.push(data);
+    if (!(data instanceof Uint8Array)) return;
+    const length = new DataView(data.buffer, data.byteOffset).getUint16(0);
+    const header = JSON.parse(new TextDecoder().decode(data.slice(2, 2+length))) as {to:string;id:string};
+    const body = JSON.parse(new TextDecoder().decode(data.slice(2+length))) as {messageID:string};
+    queueMicrotask(() => {
+      socket.message(JSON.stringify({type:'ack',from:header.to,id:header.id}));
+      if (header.to === 'ff1') {
+        const frame = encodeRelayFrame({v:2,id:'verified',to:'cli',from:'ff1'},new TextEncoder().encode(JSON.stringify({type:'RPC',messageID:body.messageID})));
+        socket.message(frame.buffer);
+      }
+    });
+  };
+  const client = new RelayClient('https://relay.test','FF1-TEST',() => socket as unknown as WebSocket);
+  socket.message(JSON.stringify({type:'hello',peers:['other-controller']}));
+  let seals = 0;
+  const result = client.requestPrepared(() => {
+    seals++;
+    return Promise.resolve({command:'ff1Envelope',request:{jwe:'opaque'},verify: () => Promise.resolve(true)});
+  }, 2000);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  socket.message(JSON.stringify({type:'peer_connected',connectionId:'ff1'}));
+  await result;
+  assert.equal(seals, 1);
+  assert.equal(socket.sent.filter((data) => data instanceof Uint8Array).length, 2);
+  client.close();
 });

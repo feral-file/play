@@ -35,8 +35,7 @@ export function relayURL(baseUrl: string, deviceId: string): string {
   )
     throw new Error('Invalid relayer endpoint');
   url.protocol = ['https:', 'wss:'].includes(url.protocol) ? 'wss:' : 'ws:';
-  url.pathname = `/v2/players/${deviceId}/connections`;
-  url.search = 'role=controller';
+  url.pathname = `/v2/channels/${deviceId}/connections`;
   return url.toString();
 }
 
@@ -69,15 +68,17 @@ export function decodeRelayFrame(frame: ArrayBuffer): { header: Header; payload:
 }
 
 /** RelayClient carries existing JSON commands and notifications over relay v2.
- * A selected player is a routing hint only. This development flow intentionally
- * provides no device authentication; receipt ACKs never imply command success.
+ * Only an endpoint-verified reply can select a candidate. Receipt ACKs are
+ * transport credit, never grant acceptance or command success.
  */
 export class RelayClient {
   private nextFrameAt = 0;
+  private frameWrites = Promise.resolve();
   private socket: WebSocket;
   private player: string | undefined;
   private peers = new Set<string>();
   private pending = new Map<string, Pending>();
+  private validators = new Map<string, (value: Record<string, unknown>) => Promise<boolean>>();
   private assemblies = new Map<string, Assembly>();
   private closed = false;
   private sequence = Promise.resolve();
@@ -110,28 +111,65 @@ export class RelayClient {
     this.socket.addEventListener('close', () => { this.close(new Error('Relayer disconnected')); });
   }
 
-  /** request resolves only on the correlated device RPC response. */
-  async request(
-    command: string,
-    request: Record<string, unknown>,
+  /** requestPrepared seals only after connection and send-queue readiness.
+   * The endpoint validator alone selects the responding device; unknown peers
+   * may receive ciphertext but cannot settle a request with an unverified reply.
+   */
+  async requestPrepared(
+    prepare: () => Promise<{
+      command: string;
+      request: Record<string, unknown>;
+      verify: (value: Record<string, unknown>) => Promise<boolean>;
+    }>,
     timeoutMs = 30000
   ): Promise<Record<string, unknown>> {
     const id = crypto.randomUUID();
-    const body = encoder.encode(JSON.stringify({ messageID: id, message: { command, request } }));
-    // Receipt credit is stop-and-wait. Budget up to one WAN round trip per
-    // chunk while preserving the caller's execution budget for ordinary RPCs.
-    const chunks = Math.ceil(body.length / CHUNK_SIZE);
-    const result = this.wait(`rpc:${id}`, timeoutMs + (chunks > 1 ? chunks * 1000 : 0));
+    // Bound queue/open waits before allocating a replay counter or sealing.
+    const result = this.wait(`rpc:${id}`, timeoutMs);
     void result.catch(() => undefined);
     const work = this.sequence.then(async () => {
       await Promise.race([this.ready, result]);
-      if (!this.pending.has(`rpc:${id}`)) throw new Error('Relay request expired');
-      if (this.closed || !this.player) throw new Error('Player unavailable');
-      await this.send(body, this.player, () => this.pending.has(`rpc:${id}`));
+      if (!this.pending.has(`rpc:${id}`)) {
+        throw new Error('Relay request expired');
+      }
+      const prepared = await prepare();
+      if (!this.pending.has(`rpc:${id}`)) {
+        throw new Error('Relay request expired');
+      }
+      this.validators.set(id, prepared.verify);
+      if (prepared.command !== 'ff1Envelope') throw new Error('V2 requires a protected envelope');
+      const body = encoder.encode(
+        JSON.stringify({
+          messageID: id,
+          message: { command: prepared.command, request: prepared.request },
+        })
+      );
+      const sent = new Set<string>();
+      while (this.pending.has(`rpc:${id}`) && !this.closed) {
+        // Presence can initially contain only another controller. Probe each
+        // new candidate once while discovery is pending, using the SAME sealed
+        // request so forwarded/replayed copies cannot execute twice.
+        const targets = (this.player ? [this.player] : [...this.peers]).filter((peer) => !sent.has(peer));
+        targets.forEach((peer) => sent.add(peer));
+        const queue = [...targets];
+        await Promise.allSettled(Array.from({length: Math.min(4, queue.length)}, async () => {
+          while (queue.length) {
+            const peer = queue.shift();
+            if (!peer) break;
+            try { await this.send(body, peer, () => this.pending.has(`rpc:${id}`)); }
+            catch { /* A failed candidate cannot prevent discovery of FF1. */ }
+          }
+        }));
+        if (this.pending.has(`rpc:${id}`)) await Promise.race([new Promise((resolve) => setTimeout(resolve, 100)), result.then(() => undefined, () => undefined)]);
+      }
     });
     this.sequence = work.catch(() => undefined);
     void work.catch((error: unknown) => { this.settle(`rpc:${id}`, undefined, error as Error); });
-    return result as Promise<Record<string, unknown>>;
+    try {
+      return await result as Record<string, unknown>;
+    } finally {
+      this.validators.delete(id);
+    }
   }
 
   /** close releases the socket and all pending calls, including readiness. */
@@ -142,6 +180,7 @@ export class RelayClient {
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
     this.assemblies.clear();
+    this.validators.clear();
     this.socket.close();
   }
 
@@ -188,19 +227,21 @@ export class RelayClient {
             relayChunk: { id: transfer, index, count, data: btoa(String.fromCharCode(...part)) },
           })
         );
-      const delay = this.nextFrameAt - Date.now();
-      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
-      if (!active()) throw new Error('Relay request expired');
       const id = crypto.randomUUID();
       const frame = encodeRelayFrame({ v: 2, id, to }, part);
-      // Leave headroom below the Worker's 1 MiB/s and 128 message/s caps.
-      this.nextFrameAt = Date.now() + Math.max(20, Math.ceil(frame.byteLength * 1000 / 750000));
-      const receipt = this.wait(`ack:${to}:${id}`, 5000);
-      try {
-        this.socket.send(frame);
-      } catch (error) {
-        this.settle(`ack:${to}:${id}`, undefined, error as Error);
-      }
+      const write = this.frameWrites.then(async () => {
+        const delay = this.nextFrameAt - Date.now();
+        if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+        if (!active() || this.closed) throw new Error('Relay request expired');
+        this.nextFrameAt = Date.now() + Math.max(20, Math.ceil(frame.byteLength * 1000 / 750000));
+        const receipt = this.wait(`ack:${to}:${id}`, 5000);
+        void receipt.catch(() => undefined);
+        try { this.socket.send(frame); }
+        catch (error) { this.settle(`ack:${to}:${id}`, undefined, error as Error); }
+        return { receipt };
+      });
+      this.frameWrites = write.then(() => undefined, () => undefined);
+      const { receipt } = await write;
       await receipt;
     }
   }
@@ -211,23 +252,60 @@ export class RelayClient {
       this.control(JSON.parse(data));
       return;
     }
-    if (!(data instanceof ArrayBuffer)) throw new Error('Invalid relay data');
+    if (!(data instanceof ArrayBuffer)) {
+      throw new Error('Invalid relay data');
+    }
     const { header, payload } = decodeRelayFrame(data);
-    if (!header.from || header.from !== this.player) return;
-    const body = this.assemble(header.from, payload);
+    const from = header.from;
+    if (!from) return;
     this.socket.send(JSON.stringify({ type: 'ack', from: header.from, id: header.id }));
-    if (!body) return;
-    const message = record(JSON.parse(decoder.decode(body)));
-    if (message['type'] === 'RPC' && typeof message['messageID'] === 'string')
-      this.settle(`rpc:${message['messageID']}`, message);
-    else this.onNotification?.(message);
+    if (!this.peers.has(from) || (this.player && header.from !== this.player)) {
+      return;
+    }
+    let body: Uint8Array | undefined;
+    try {
+      body = this.assemble(from, payload);
+    } catch {
+      return;
+    }
+    if (!body) {
+      return;
+    }
+    let message: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(decoder.decode(body));
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+      message = parsed as Record<string, unknown>;
+    } catch { return; }
+    const messageId = message["messageID"];
+    if (message['type'] === 'RPC' && typeof messageId === 'string') {
+      const verify = this.validators.get(messageId);
+      if (verify) {
+        void verify(message)
+          .then((accepted) => {
+            if (
+              accepted &&
+              this.peers.has(from) &&
+              this.pending.has(`rpc:${messageId}`)
+            ) {
+              this.player = header.from;
+              this.settle(`rpc:${messageId}`, message);
+            }
+          })
+          .catch(() => undefined);
+      }
+    } else {
+      if (header.from === this.player) {
+        this.onNotification?.(message);
+      }
+    }
   }
 
   /** control keeps connection presence separate from command completion. */
   private control(raw: unknown): void {
     const event = record(raw);
-    if (event['type'] === 'hello' && Array.isArray(event['peers'])) for (const peer of event['peers']) { if (typeof peer === 'string') this.peers.add(peer); }
-    if (event['type'] === 'peer_connected' && typeof event['connectionId'] === 'string') this.peers.add(event['connectionId']);
+    if (event['type'] === 'hello' && Array.isArray(event['peers'])) for (const peer of event['peers'].slice(0, 35)) { if (typeof peer === 'string') this.peers.add(peer); }
+    if (this.peers.size < 35 && event['type'] === 'peer_connected' && typeof event['connectionId'] === 'string') this.peers.add(event['connectionId']);
     if (event['type'] === 'peer_disconnected' && typeof event['connectionId'] === 'string') {
       this.peers.delete(event['connectionId']);
       this.assemblies.delete(event['connectionId']);
@@ -237,7 +315,6 @@ export class RelayClient {
       }
     }
     if (!this.player && this.peers.size) {
-      this.player = this.peers.values().next().value;
       this.readiness.resolve(undefined);
     }
     if (event['type'] === 'ack' && typeof event['from'] === 'string' && typeof event['id'] === 'string') this.settle(`ack:${event['from']}:${event['id']}`);

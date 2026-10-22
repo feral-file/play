@@ -1,4 +1,3 @@
-import { RelayClient } from "./relay-client.js";
 import { PlayError } from "./errors.js";
 
 export type Dp1Playlist = Record<string, unknown>;
@@ -8,26 +7,15 @@ export type DisplayDp1PlaylistOptions = {
   relayerBaseUrl: string;
 };
 
-function executionSucceeded(value: unknown): boolean {
-  if (typeof value !== "object" || value === null) return false;
-  const result = value as Record<string, unknown>;
-  return typeof result["ok"] === "boolean" ? result["ok"] : executionSucceeded(result["message"]);
-}
-
-/** Display an unchanged DP-1 command through the device-ID binary transport.
- * Device IDs select a destination; this release does not authenticate peers.
- * The returned promise requires the FF1 execution response, not a receipt ACK.
+/** Protected browser casting awaits the shared registration/result validators
+ * and browser grant contract. Never substitute plaintext or an owner grant.
+ * The generic RelayClient and TemporaryChannel adapters are independently usable
+ * by reviewed endpoint workflows, but are not enrollment implementations.
  */
-export async function displayDp1Playlist(options: DisplayDp1PlaylistOptions): Promise<void> {
-  if (!options.relayerBaseUrl.trim()) throw new Error("relayer base URL is required");
-  if (!options.deviceId.trim()) throw new Error("device ID is required");
-  const client = new RelayClient(options.relayerBaseUrl, options.deviceId);
-  try {
-    const result = await client.request("displayPlaylist", {
-      intent: { action: "now_display" }, dp1_call: options.playlist
-    });
-    if (!executionSucceeded(result)) throw new PlayError("FF1 rejected display request", "display_rejected");
-  } finally {
-    client.close();
-  }
+export function displayDp1Playlist(_options: DisplayDp1PlaylistOptions): Promise<void> {
+	void _options;
+	return Promise.reject(new PlayError(
+		"Protected browser pairing and casting await the shared endpoint integration",
+		"secure_integration_unavailable",
+	));
 }

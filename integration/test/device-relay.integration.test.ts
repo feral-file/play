@@ -1,14 +1,14 @@
 import { createServer } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import { afterEach, expect, it } from "vitest";
-import { displayDp1Playlist } from "@feralfile/play";
+import { RelayClient } from "@feralfile/play";
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const close of cleanup.splice(0)) await close();
 });
 
-it("routes browser playback by device ID and waits for the unchanged device reply", async () => {
+it("routes opaque protected payloads through generic channels (synthetic endpoint seam)", async () => {
   const server = createServer();
   const sockets = new WebSocketServer({ server, handleProtocols: () => "ff-relay.v2" });
   const previous = globalThis.WebSocket;
@@ -44,8 +44,15 @@ it("routes browser playback by device ID and waits for the unchanged device repl
       }))]));
     });
   });
-  const playlist = { dpVersion: "1.0.0", title: "Integration", items: [{ source: "https://example.com/art.html", duration: 30 }] };
-  await displayDp1Playlist({ deviceId: "FF1-TEST", relayerBaseUrl: `http://127.0.0.1:${String(address.port)}`, playlist });
-  expect(requests).toEqual(["/v2/players/FF1-TEST/connections?role=controller"]);
-  expect(command?.['message']).toEqual({ command: "displayPlaylist", request: { intent: { action: "now_display" }, dp1_call: playlist } });
+  const client = new RelayClient(`http://127.0.0.1:${String(address.port)}`, "FF1-TEST");
+  try {
+    await client.requestPrepared(() => Promise.resolve({
+      command: 'ff1Envelope', request: {v:1,jwe:'synthetic-endpoint-bytes'},
+      // This integration checks wire delivery; shared endpoint conformance is
+      // blocked on Brandon's registration/result fixtures, not faked here.
+      verify: () => Promise.resolve(true),
+    }));
+  } finally { client.close(); }
+  expect(requests).toEqual(["/v2/channels/FF1-TEST/connections"]);
+  expect(command?.['message']).toEqual({command:'ff1Envelope',request:{v:1,jwe:'synthetic-endpoint-bytes'}});
 });
