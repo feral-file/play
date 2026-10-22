@@ -1,25 +1,3 @@
-# Generic transport integration (PR #24)
-
-The browser adapters use `/v2/channels/{channelId}/connections` with
-`ff-relay.v2`. Device IDs and presence are routing hints only. A device candidate
-must pass the existing pinned endpoint validator. The temporary adapter carries
-opaque targeted bytes and exposes connection identity before QR display.
-
-**Protected browser pairing and casting are blocked in this branch.** Brandon's
-ps-bound QR/result fixtures and browser grant/key-custody integration are not yet
-available. `displayDp1Playlist` returns `secure_integration_unavailable` before
-opening a socket. The sample reports that state. There is no plaintext cast,
-owner-grant substitution, invented display role or browser permission policy.
-
-See [adapter contract and verification](clients/session-recipient/js/README.md).
-The legacy Go broker/minter below are unchanged. This PR does not retire
-production mint pairing or publish a package.
-
-The following describes the existing production mint-pairing system, not evidence
-that the new secure generic-channel flow is ready.
-
----
-
 # Play on Art Computer
 
 This repository contains everything behind the **Play on Art Computer** action:

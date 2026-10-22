@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import { afterEach, expect, it } from "vitest";
-import { RelayClient } from "@feralfile/play";
+import { RelayClient } from "@feralfile/play/experimental";
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {

@@ -5,7 +5,6 @@
  * stay human-readable and may change between versions; codes do not.
  */
 export type PlayErrorCode =
-  | "secure_integration_unavailable"
   | "pairing_code_expired"
   | "mint_rejected"
   | "approval_timeout"
