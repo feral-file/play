@@ -24,4 +24,5 @@ npm run bundle
 - The site's origin comes from `window.location.origin` and is attested by the browser's `Origin` header at channel creation; never accept a caller-supplied origin.
 - The pairing token travels only inside the app link handed to the visitor; never log it or put it in thrown errors.
 - Render the pairing QR locally from the bundled `qrcode-generator`; no network fetch for pairing images.
+- Keep relay v2 code behind `@feralfile/play/experimental`; the default entry and the button stay on mint pairing and the legacy relayer until browser display grants are defined.
 - Keep TypeScript strict mode, `noUncheckedIndexedAccess`, and type-aware ESLint rules enabled.

@@ -28,6 +28,13 @@ serving that path for sites that have not upgraded. The
 integration surface is pre-1.0: expect additive change, and open issues freely
 — integration feedback is exactly what this stage is for.
 
+Production Play still pairs through the Mint Pairing Broker and casts over
+the legacy `ff-relayer` path, and stays there until browser display grants
+are defined in the FF1 control protocol (feral-file/feral-file#3551). The
+relay v2 carriers under `@feralfile/play/experimental` are not used by the
+default API or the button; see
+[Experimental: relay v2](clients/session-recipient/js/README.md#experimental-relay-v2).
+
 ## Components
 
 - [clients/session-recipient/js](clients/session-recipient/js/README.md): the `@feralfile/play` browser library websites embed.

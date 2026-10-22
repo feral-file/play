@@ -22,6 +22,12 @@ tests run under Node, whose `fetch` sends no `Origin` header, so they add the
 header a browser would send; the broker attests it for browser-created
 channels.
 
+`test/device-relay.integration.test.ts` drives the experimental relay v2
+`RelayClient` against a local WebSocket relay. Its reply verifier is a
+deterministic stand-in for the devSig check: it shows a forger's reply never
+settles a request, not that registration or protected casting works.
+Production Play uses the mint pairing path above.
+
 ## Expectations
 
 - Tests use isolated temporary storage.
