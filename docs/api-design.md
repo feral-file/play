@@ -588,3 +588,10 @@ except for coarse transport state such as a closed channel.
   performs those integrations and passes final result payloads into the library.
 - The mint library does not send raw browser session tokens outside the E2EE
   broker response to the browser.
+
+## Not served by the merged Cloudflare relayer
+
+The merged Cloudflare relayer (`feral-file/ff-relayer#26`) does not serve this
+`/v1/*` contract: `/v1/channels` and `/v1/pairing-codes` answer 410 there. The
+broker for mint pairing stays the bbolt server in this repo. Do not point
+broker clients at the Worker.
