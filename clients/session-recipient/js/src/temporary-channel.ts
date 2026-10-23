@@ -1,3 +1,4 @@
+import { startPinging } from './liveness.js';
 import { decodeRelayFrame, encodeRelayFrame, relayURL } from './relay-client.js';
 
 /** TemporaryChannel supplies only the generic carrier seam for the reviewed
@@ -11,6 +12,7 @@ export class TemporaryChannel {
   readonly ready: Promise<void>;
   private socket: WebSocket;
   private timer: ReturnType<typeof setTimeout>;
+  private pinger: ReturnType<typeof setInterval>;
   private closed = false;
   private resolveReady!: () => void;
   private rejectReady!: (error: Error) => void;
@@ -49,6 +51,7 @@ export class TemporaryChannel {
     });
     this.socket.addEventListener('close', () => { this.close(new Error('Pairing channel disconnected')); });
     this.socket.addEventListener('error', () => { this.close(new Error('Pairing channel failed')); });
+    this.pinger = startPinging(this.socket);
   }
 
   /** send targets encrypted endpoint bytes; resolving means receipt, not approval. */
@@ -84,6 +87,7 @@ export class TemporaryChannel {
     }
     this.closed = true;
     clearTimeout(this.timer);
+    clearInterval(this.pinger);
     this.rejectReady(reason);
     for (const pending of this.receipts.values()) {
       clearTimeout(pending.timer);
@@ -97,6 +101,9 @@ export class TemporaryChannel {
 
   /** receive releases transport credit before handing ciphertext to validators. */
   private receive(data: unknown): void {
+    if (data === 'pong') {
+      return; // the relay's answer to our liveness ping
+    }
     if (typeof data !== 'string') {
       if (!(data instanceof ArrayBuffer)) {
         throw new Error('Invalid binary frame');

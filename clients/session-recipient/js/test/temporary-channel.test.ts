@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { test } from 'vitest';
+import { test, vi } from 'vitest';
 import { TemporaryChannel } from '../src/temporary-channel.js';
 import { encodeRelayFrame } from '../src/relay-client.js';
 
@@ -53,4 +53,24 @@ test('temporary timeout and cancellation are local failures, with no implicit re
   const pending = assert.rejects(next.ready, /cancelled/);
   next.close();
   await pending;
+});
+
+test('the pairing channel pings every 25 s, ignores pong and stops once closed', () => {
+  vi.useFakeTimers();
+  try {
+    const socket = new Socket();
+    const channel = new TemporaryChannel('https://relay.test', undefined, 120000, () => socket as unknown as WebSocket);
+    socket.message(JSON.stringify({type:'hello', connectionId:'secondary', peers:[]}));
+    vi.advanceTimersByTime(100_000);
+    // Without pings the relay closes an idle socket at 90 s, before this
+    // channel's own 120 s timeout.
+    assert.equal(socket.sent.filter((value) => value === 'ping').length, 4);
+    socket.message('pong');
+    assert.equal(socket.closed, false);
+    channel.close();
+    vi.advanceTimersByTime(100_000);
+    assert.equal(socket.sent.filter((value) => value === 'ping').length, 4);
+  } finally {
+    vi.useRealTimers();
+  }
 });

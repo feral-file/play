@@ -1,3 +1,5 @@
+import { startPinging } from './liveness.js';
+
 /** Maximum reconstructed command size, matching the FF1 command ingress. */
 const MAX_MESSAGE = 4 * 1024 * 1024;
 /** Total bytes held across all in-progress reassemblies, whatever their sender. */
@@ -115,6 +117,7 @@ export function decodeRelayFrame(frame: ArrayBuffer): { header: ForwardedHeader;
  */
 export class RelayClient {
   private nextFrameAt = 0;
+  private pinger: ReturnType<typeof setInterval>;
   private frameWrites = Promise.resolve();
   private socket: WebSocket;
   private player: string | undefined;
@@ -151,6 +154,7 @@ export class RelayClient {
     });
     this.socket.addEventListener('error', () => { this.close(new Error('Relayer connection failed')); });
     this.socket.addEventListener('close', () => { this.close(new Error('Relayer disconnected')); });
+    this.pinger = startPinging(this.socket);
   }
 
   /** requestPrepared seals only after connection and send-queue readiness.
@@ -225,6 +229,7 @@ export class RelayClient {
   close(error = new Error('Relay client closed')): void {
     if (this.closed) return;
     this.closed = true;
+    clearInterval(this.pinger);
     this.readiness.reject(error);
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
@@ -313,6 +318,9 @@ export class RelayClient {
 
   /** receive distinguishes relay controls from the existing application envelope. */
   private receive(data: unknown): void {
+    if (data === 'pong') {
+      return; // the relay's answer to our liveness ping
+    }
     if (typeof data === 'string') {
       this.control(JSON.parse(data));
       return;

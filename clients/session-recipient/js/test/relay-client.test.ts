@@ -335,3 +335,24 @@ test('reassembly memory is capped across peers and expired buffers are swept', (
     client.close();
   }
 });
+
+test('pings every 25 s, ignores the relay pong and stops pinging once closed', () => {
+  vi.useFakeTimers();
+  try {
+    const socket = new Socket();
+    const client = new RelayClient('https://relay.example', 'FF1-TEST', () => socket as unknown as WebSocket);
+    socket.message(JSON.stringify({ type: 'hello', connectionId: 'controller', peers: [] }));
+    vi.advanceTimersByTime(25_000);
+    assert.deepEqual(socket.sent.filter((value) => value === 'ping'), ['ping']);
+    // Before: the text frame "pong" went to JSON.parse and closed the client.
+    socket.message('pong');
+    assert.equal(socket.closed, false);
+    vi.advanceTimersByTime(25_000);
+    assert.equal(socket.sent.filter((value) => value === 'ping').length, 2);
+    client.close();
+    vi.advanceTimersByTime(100_000);
+    assert.equal(socket.sent.filter((value) => value === 'ping').length, 2);
+  } finally {
+    vi.useRealTimers();
+  }
+});
