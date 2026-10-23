@@ -86,26 +86,6 @@ now `createPairingDialog`, and the error codes `pairing_code_not_found` and
 `pairing_code_used` no longer exist. The wrapped button is unchanged apart
 from the new optional `appLinkBaseUrl`.
 
-## Experimental: relay v2
-
-`@feralfile/play/experimental` exports `RelayClient`, `TemporaryChannel` and
-the relay v2 frame helpers. Nothing in the default entry or the **Play on Art
-Computer** button uses them: production Play still uses mint pairing and the
-legacy relayer cast above, and stays there until browser display grants are
-defined. The experimental surface may change in any release.
-
-- `RelayClient.requestPrepared` carries only a sealed `ff1Envelope`; FF1
-  refuses all plaintext on v2. The caller seals the request and must supply
-  `verify`, which settles the request only for a reply that verifies under
-  the pinned device profile. There is no accept-all default.
-- Before a reply verifies, the first envelope goes out once as
-  `to:"peers"`, so every peer on the public device channel sees its
-  ciphertext, size and timing. Later requests go only to the verified peer.
-- It has no notification callback: Play sessions never subscribe to
-  notifications.
-- No `display` role, browser key custody or owner-grant substitute is
-  defined; do not build one on this surface.
-
 ## Commands
 
 ```sh
