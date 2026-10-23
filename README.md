@@ -29,7 +29,7 @@ integration surface is pre-1.0: expect additive change, and open issues freely
 — integration feedback is exactly what this stage is for.
 
 Production Play pairs through the Mint Pairing Broker and casts over the
-legacy `ff-relayer` path, and stays there until browser display grants are
+existing `ff-relayer` `/api` transport, and stays there until browser display grants are
 defined in the FF1 control protocol (feral-file/feral-file#3551). This library
 has no relay v2 carrier: when display grants exist, it will be ported from
 the maintained ff-cli client rather than kept as a second copy.
