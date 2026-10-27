@@ -1,5 +1,5 @@
 import qrcode from "qrcode-generator";
-import { displayDp1Playlist, type DisplayDp1PlaylistOptions, type Dp1Playlist } from "./cast.js";
+import { displayDp1Playlist, tooManyCastsMessage, type DisplayDp1PlaylistOptions, type Dp1Playlist } from "./cast.js";
 import {
   legacySessionStorageKey,
   readStoredEphemeralBrowserSession,
@@ -186,7 +186,7 @@ export function pairingErrorMessage(error: unknown): string {
       case "too_many_sites":
         return "Your Art Computer has as many paired sites as it allows. Remove one in the Feral File app first.";
       case "display_failed":
-        return "Could not reach your Art Computer. Check that it is online and try again.";
+        return error.message === tooManyCastsMessage ? error.message : "Could not reach your Art Computer. Check that it is online and try again.";
       case "display_rejected":
         return "Your Art Computer refused the playlist.";
       default:

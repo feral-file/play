@@ -140,6 +140,19 @@ describe("displayDp1Playlist over relay v2", () => {
     expect(await readStoredDisplayGrant(testOrigin)).toBeDefined();
   });
 
+  it("maps a connection the relay refuses before hello (429 capacity or rate limited) to display_failed as too many casts, not offline", async () => {
+    await seeded();
+    const relay = fakeRelay({ peers: [{ id: "conn_ff1" }], failConnect: 1006 });
+    const error = await captureError(displayDp1Playlist({ session, playlist, socketFactory: relay.socketFactory }));
+    expect((error as PlayError).code).toBe("display_failed");
+    expect((error as PlayError).message).toMatch(/Too many casts/);
+    expect((error as PlayError).message).not.toMatch(/offline/);
+    // Every connect attempt was refused; nothing was sent and the grant is kept.
+    expect(relay.sockets).toHaveLength(3);
+    expect(relay.frames).toHaveLength(0);
+    expect(await readStoredDisplayGrant(testOrigin)).toBeDefined();
+  });
+
   it("maps a connection that drops after the send (RelayAmbiguousError) to display_failed without resending", async () => {
     await seeded();
     let socket: FakeSocket | undefined;

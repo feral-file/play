@@ -230,7 +230,7 @@ codes will not. `pairingErrorMessage(error)` maps them to user-facing text.
 | `error.code` | Meaning |
 | :-- | :-- |
 | `pairing_code_expired` | The channel expired before an Art Computer joined (headless `requestEphemeralSession` with no `channelRegenerations`). Press play again for a fresh code. |
-| `mint_rejected` | The owner declined the approval in the mobile app, or the FF1 could not ask its owner (`approval_unavailable`: no app reachable to approve). |
+| `mint_rejected` | The owner declined the approval in the mobile app, or the FF1 could not deliver the approval request. |
 | `approval_timeout` | No approval within `maxWaitMs` (default 5 minutes) after the Art Computer joined, or every replacement channel expired before one joined. |
 | `device_unsupported` | The FF1 cannot issue a display grant: its FF OS predates display grants, or it has no relay v2 endpoint configured. Tell the visitor to update the Art Computer. |
 | `too_many_sites` | The FF1 holds as many paired sites as it allows (16). The owner removes one under Paired sites first. |
@@ -239,7 +239,7 @@ codes will not. `pairingErrorMessage(error)` maps them to user-facing text.
 | `device_unrecognized` | The FF1 answered that it does not know this grant, but unverified. The grant is kept; the wrapped button offers "Pair again?", custom integrations ask the visitor before clearing. |
 | `pairing_canceled` | User closed the pairing dialog, or your `signal` aborted. |
 | `display_rejected` | The FF1 verified the request and refused it (`permission_denied`, or the player failed). |
-| `display_failed` | The FF1 is offline (no peer on its relay channel), no verified reply arrived before the deadline, the relay dropped the connection after the send, or the FF1 reported a replayed request. Nothing is resent automatically: press play again. |
+| `display_failed` | The FF1 is offline (no peer on its relay channel), the relay refused the connection (its per-address cap: more than 6 tabs casting at once from one network answer "Too many casts at once…"), no verified reply arrived before the deadline, the relay dropped the connection after the send, or the FF1 reported a replayed request. Nothing is resent automatically: press play again. |
 
 ## Network endpoints
 
@@ -308,7 +308,7 @@ Which library works with which Art Computer:
 | FF OS without display grants | 0.5 | `device_unsupported` (the device mints a session, which 0.5 discards; the row stays under Paired sites until it expires or is removed) |
 | FF OS with display grants | 0.4 | browser session, unchanged, until the legacy controller API is retired |
 | FF OS with display grants | 0.5 | display grant, cast over relay v2 |
-| FF OS with display grants, not yet secured (no owner), legacy controller API retired | 0.5 | existing grants keep casting; a new pairing fails with `mint_rejected` until the owner secures the FF1 in the app |
+| FF OS with display grants, not yet secured (no owner), legacy controller API retired | 0.5 | existing grants keep casting; a new pairing ends in `approval_timeout` (the request is sent, but no app receives it) until the owner secures the FF1 in the app |
 | any, legacy controller API retired | 0.4 | broken: upgrade to 0.5 first |
 
 Upgrade to 0.5 once Feral File announces that FF OS with display grants is

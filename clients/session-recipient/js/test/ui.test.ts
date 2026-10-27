@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import qrcode from "qrcode-generator";
+import { tooManyCastsMessage } from "../src/cast.js";
 import { PlayError } from "../src/errors.js";
 import {
   clearStoredEphemeralBrowserSession,
@@ -286,6 +287,7 @@ describe("pairing dialog copy", () => {
     expect(pairingErrorMessage(new PlayError("no idb", "storage_unavailable"))).toContain("store the pairing");
     expect(pairingErrorMessage(new PlayError("cap", "too_many_sites"))).toContain("Remove one");
     expect(pairingErrorMessage(new PlayError("offline", "display_failed"))).toContain("Could not reach");
+    expect(pairingErrorMessage(new PlayError(tooManyCastsMessage, "display_failed"))).toBe(tooManyCastsMessage);
     expect(pairingErrorMessage(new PlayError("refused", "display_rejected"))).toContain("refused");
     expect(pairingErrorMessage(new Error("channel create failed: 429"))).toBe("channel create failed: 429");
   });

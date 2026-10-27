@@ -1,6 +1,6 @@
 import type { EphemeralBrowserSession } from "./client.js";
 import { findEnvelopeAnswer, openReply, sealRequest, type ReplyClaims } from "./control/codec.js";
-import { RelayClient, RelayUndeliveredError, type SocketFactory } from "./control/relay-client.js";
+import { RelayClient, RelayConnectError, RelayUndeliveredError, type SocketFactory } from "./control/relay-client.js";
 import { PlayError } from "./errors.js";
 import { deleteStoredDisplayGrant, readStoredDisplayGrant, reserveCounter, type StoredDisplayGrant } from "./grantStore.js";
 
@@ -16,6 +16,8 @@ export type DisplayDp1PlaylistOptions = {
 };
 
 const defaultTimeoutMs = 30_000;
+/** Shown as-is by the wrapped button: the one display_failed a visitor can act on by waiting. */
+export const tooManyCastsMessage = "Too many casts at once from this network, or the relay is unreachable. Try again in a moment.";
 /** Bytes a request may carry before the relay's chunk pacing earns it more time. */
 const chunkSize = 32_768;
 /** A self-revoke is best effort: it gets a short deadline and its outcome is ignored. */
@@ -178,6 +180,12 @@ export async function displayDp1Playlist(options: DisplayDp1PlaylistOptions): Pr
   if (outcome.kind === "failed") {
     if (outcome.unrecognized) {
       throw new PlayError("the FF1 no longer recognizes this site's pairing", "device_unrecognized");
+    }
+    if (outcome.error instanceof RelayConnectError) {
+      // The relay refused or dropped the connection before hello. Browsers
+      // see no status, and the usual cause is the relay's per-address cap
+      // (429 capacity / rate limited) when many tabs cast at once.
+      throw new PlayError(tooManyCastsMessage, "display_failed");
     }
     if (outcome.error instanceof RelayUndeliveredError) {
       throw new PlayError("the FF1 is offline", "display_failed");

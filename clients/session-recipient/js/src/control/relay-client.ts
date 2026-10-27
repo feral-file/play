@@ -121,6 +121,20 @@ export class RelayAmbiguousError extends Error {
   }
 }
 
+/**
+ * RelayConnectError is the RelayUndeliveredError of a connection that never
+ * reached `hello`: the relay refused or dropped every attempt. A browser
+ * WebSocket cannot tell a 429 (`capacity`, `rate limited`) from an outage,
+ * so the caller must not read it as "the FF1 is offline"; only an empty
+ * `hello` proves that.
+ */
+export class RelayConnectError extends RelayUndeliveredError {
+  constructor(message: string) {
+    super(message);
+    this.name = "RelayConnectError";
+  }
+}
+
 /** relayURL selects the public device channel without credentials. */
 export function relayURL(baseUrl: string, deviceId: string): string {
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(deviceId)) {
@@ -286,7 +300,7 @@ export class RelayClient {
         this.retryTimer = setTimeout(() => { this.connect(attempt + 1); }, backoffMs(attempt));
         return;
       }
-      this.close(error);
+      this.close(this.connected ? error : new RelayConnectError(error.message));
     };
     socket.addEventListener("message", (event) => {
       if (socket !== this.socket) {
