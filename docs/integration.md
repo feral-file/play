@@ -116,6 +116,8 @@ Useful options (see `PlayOnArtComputerButtonOptions` in
 - `onStatusChange`, `onSuccess`, `onError` — drive your own status UI.
 - `pairAgainLabel` — the button label after `device_unrecognized` (default
   "Pair again?"); the next click clears the grant and pairs again.
+- `socketFactory`, `castTimeoutMs` — a custom `WebSocket` opener and the
+  per-cast relay deadline, passed through to `displayDp1Playlist`.
 - `browserInfo` — `{ name, userAgent, label }` shown to the user in the
   mobile-app approval prompt. Set `label` to something the visitor will
   recognize, e.g. your site name.

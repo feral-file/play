@@ -110,6 +110,8 @@ export type PlayOnArtComputerButtonOptions = {
   fetchImpl?: typeof fetch;
   /** Opens the relay WebSocket; defaults to the browser's `WebSocket`. */
   socketFactory?: SocketFactory;
+  /** Deadline for one cast's relay round trip; see `DisplayDp1PlaylistOptions.timeoutMs`. */
+  castTimeoutMs?: number;
   document?: Document;
   buttonLabel?: string;
   busyLabel?: string;
@@ -535,7 +537,8 @@ function displayOptions(
   return {
     session,
     playlist,
-    ...(buttonOptions.socketFactory === undefined ? {} : { socketFactory: buttonOptions.socketFactory })
+    ...(buttonOptions.socketFactory === undefined ? {} : { socketFactory: buttonOptions.socketFactory }),
+    ...(buttonOptions.castTimeoutMs === undefined ? {} : { timeoutMs: buttonOptions.castTimeoutMs })
   };
 }
 

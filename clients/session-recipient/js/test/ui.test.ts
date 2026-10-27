@@ -720,6 +720,7 @@ describe("mountPlayOnArtComputerButton", () => {
     const broker = await fakeBroker({ waitingPolls: Number.MAX_SAFE_INTEGER });
     const { document } = fakeDocumentWithContainer();
     const failures: unknown[] = [];
+    let reportFailure: (() => void) | undefined;
     let cancel: (() => void) | undefined;
     const handle = mountPlayOnArtComputerButton({
       container: "#play-button-container",
@@ -728,21 +729,23 @@ describe("mountPlayOnArtComputerButton", () => {
       pollIntervalMs: 5,
       fetchImpl: broker.fetchImpl,
       socketFactory: relay.socketFactory,
+      // The stub answers at once; the verdict needs the relay deadline to pass.
+      castTimeoutMs: 300,
       document,
       createDialog: (options) => {
         cancel = options.onCancel;
         return createPairingDialog(options);
       },
-      onError: (error) => failures.push(error)
+      onError: (error) => {
+        failures.push(error);
+        reportFailure?.();
+      }
     });
-    // Shorten the relay deadline the button cannot set: the stub answers at once,
-    // and the verdict needs the deadline to pass.
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const firstFailure = new Promise<void>((resolve) => {
+      reportFailure = resolve;
+    });
     handle.element.click();
-    for (let step = 0; step < 400 && failures.length === 0; step += 1) {
-      await vi.advanceTimersByTimeAsync(100);
-    }
-    vi.useRealTimers();
+    await firstFailure;
 
     expect((failures[0] as PlayError).code).toBe("device_unrecognized");
     expect(handle.element.textContent).toBe("Pair again?");
@@ -755,8 +758,11 @@ describe("mountPlayOnArtComputerButton", () => {
     }
     // The tap cleared the grant and started a new pairing.
     expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
+    const secondFailure = new Promise<void>((resolve) => {
+      reportFailure = resolve;
+    });
     cancel?.();
-    await waitFor(() => failures.length === 2);
+    await secondFailure;
     expect((failures[1] as PlayError).code).toBe("pairing_canceled");
     expect(handle.element.textContent).toBe("Play on Art Computer");
   });
