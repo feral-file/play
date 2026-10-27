@@ -1,4 +1,7 @@
+import "fake-indexeddb/auto";
+import { IDBFactory } from "fake-indexeddb";
 import { execFileSync, spawn, type ChildProcessByStdio } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -9,6 +12,7 @@ import {
   encryptChannelMessage,
   exportPublicJwk,
   generateBrowserKeyPair,
+  hasStoredEphemeralBrowserSession,
   requestEphemeralSession,
   type PairingMaterial
 } from "@feralfile/play";
@@ -18,6 +22,7 @@ type JoinChannelResponse = {
   role: "minter";
   minterToken: string;
   browserPublicKeyJwk: JsonWebKey;
+  mintRequest: { displayGrant: unknown };
   origin: string;
   expiresAt: string;
   nextSeq: number;
@@ -48,7 +53,22 @@ type MintRequestPlaintext = {
   requestMessageId: string;
   origin: string;
   browserPublicKeyJwk: JsonWebKey;
+  displayGrant: { v: 1; sig: { x: string; y: string }; enc: { x: string; y: string } };
 };
+
+/** The public profile of FF1-FIXTURE1 (clients/session-recipient/js/test/fixtures/ff1-control-v1/keys.json). */
+const fixtureProfile = {
+  v: 1,
+  dev: "FF1-FIXTURE1",
+  gen: "772x9uI4OcVjB0inn2MHLA",
+  sig: { crv: "P-256", kty: "EC", x: "5jpANW8lLoNYtEBXDv2jPgpWd26B0qqVN2zZwUAfw64", y: "DT4WvFtjCo0h6XHTGMG7cmPVBYFqYFN3OYlIbUREyQg" },
+  enc: { crv: "P-256", kty: "EC", x: "m_DDu8fTpmS9lGeEuKDUpSXiFQCwMEXEOtlqtFxn_b0", y: "T-W2r4vBsiYSbwb7_C48ZPvr9yQufQZAvWQXsMpHGCU" }
+};
+
+/** RFC 7638 thumbprint of a P-256 JWK: the ctl a grant is issued under. */
+function thumbprint(jwk: { x: string; y: string }): string {
+  return createHash("sha256").update(`{"crv":"P-256","kty":"EC","x":"${jwk.x}","y":"${jwk.y}"}`).digest("base64url");
+}
 
 type DockerBroker = {
   baseUrl: string;
@@ -289,11 +309,12 @@ async function sendMintSuccess(input: {
       type: "mint_succeeded",
       channelId: input.channelId,
       requestMessageId: input.request.requestMessageId,
-      session: {
-        sessionId: "eps_integration",
-        token: "integration-browser-session-token",
-        expiresAt: "2030-01-01T00:00:00.000Z",
-        relayerBaseUrl: "https://relayer.example"
+      displayGrant: {
+        v: 1,
+        ctl: thumbprint(input.request.displayGrant.sig),
+        profile: fixtureProfile,
+        relayV2Endpoint: "https://relay.example",
+        expiresAt: "2030-01-01T00:00:00.000Z"
       }
     }
   });
@@ -313,6 +334,8 @@ beforeAll(() => {
 }, 120_000);
 
 beforeEach(() => {
+  // Each test pairs afresh: a stored grant would skip the broker entirely.
+  Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: new IDBFactory() });
   previousLocationDescriptor = Object.getOwnPropertyDescriptor(globalThis, "location");
   Object.defineProperty(globalThis, "location", {
     configurable: true,
@@ -362,14 +385,13 @@ describe("site-initiated mint pairing integration", () => {
   it.each([
     { name: "the app link's channel and pairing token", credential: (material: PairingMaterial): HelperCredential => credentialFromAppLink(material) },
     { name: "the six-digit code", credential: (material: PairingMaterial): HelperCredential => ({ shortCode: material.shortCode }) }
-  ])("the Go minter joins the browser's channel with $name and delivers the session", async ({ credential }) => {
+  ])("the Go minter joins the browser's channel with $name and issues a display grant", async ({ credential }) => {
     const broker = await startBroker();
     const pairing = waitForMaterial();
     const browserSessionPromise = requestEphemeralSession({
       brokerBaseUrl: broker.baseUrl,
       appLinkBaseUrl: "https://link.feralfile.com/pair",
       browserInfo: { name: "Integration Browser" },
-      storage: false,
       pollIntervalMs: 50,
       maxWaitMs: 10_000,
       fetchImpl: browserFetch(testOrigin),
@@ -380,12 +402,14 @@ describe("site-initiated mint pairing integration", () => {
     expect(material.shortCode).toMatch(/^[0-9]{6}$/);
     const helper = startGoMinterHelper(broker.baseUrl, credential(material));
     try {
-      await expect(browserSessionPromise).resolves.toEqual({
-        token: "go-integration-browser-session-token",
-        sessionId: "eps_go_integration",
+      const session = await browserSessionPromise;
+      expect(session).toEqual({
+        deviceId: "FF1-FIXTURE1",
+        ctl: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) as unknown,
         expiresAt: "2030-01-01T00:00:00Z",
-        relayerBaseUrl: "https://relayer.example"
+        persistent: false
       });
+      expect(await hasStoredEphemeralBrowserSession(testOrigin)).toBe(true);
       await helper.done;
     } finally {
       stopHelper(helper.child);
@@ -400,7 +424,6 @@ describe("site-initiated mint pairing integration", () => {
     const browserSessionPromise = requestEphemeralSession({
       brokerBaseUrl: firstBroker.baseUrl,
       browserInfo: { name: "Integration Browser" },
-      storage: false,
       pollIntervalMs: 50,
       maxWaitMs: 10_000,
       fetchImpl: browserFetch(testOrigin),
@@ -435,6 +458,9 @@ describe("site-initiated mint pairing integration", () => {
       supportsPersistentSessions: true
     });
     expect(plaintext.browserPublicKeyJwk).toEqual(join.browserPublicKeyJwk);
+    // The grant keys are announced at create too, stripped to kty/crv/x/y.
+    expect(plaintext.displayGrant).toEqual(join.mintRequest.displayGrant);
+    expect(Object.keys(plaintext.displayGrant.sig).sort()).toEqual(["crv", "kty", "x", "y"]);
 
     stopBroker(broker.containerId);
     const restartedAfterMessageBroker = await startBroker(broker.dataDir, brokerPort);
@@ -449,10 +475,10 @@ describe("site-initiated mint pairing integration", () => {
     });
 
     await expect(browserSessionPromise).resolves.toEqual({
-      token: "integration-browser-session-token",
-      sessionId: "eps_integration",
+      deviceId: "FF1-FIXTURE1",
+      ctl: thumbprint(plaintext.displayGrant.sig),
       expiresAt: "2030-01-01T00:00:00.000Z",
-      relayerBaseUrl: "https://relayer.example"
+      persistent: false
     });
   }, 60_000);
 
@@ -463,7 +489,6 @@ describe("site-initiated mint pairing integration", () => {
     const broker = await startBroker();
     await expect(requestEphemeralSession({
       brokerBaseUrl: broker.baseUrl,
-      storage: false,
       fetchImpl: fetchImpl()
     })).rejects.toThrow("channel create failed: 400");
   }, 30_000);

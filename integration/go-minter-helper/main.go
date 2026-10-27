@@ -1,10 +1,14 @@
 // Command go-minter-helper plays the Art Computer in the integration tests: it
 // joins a channel the browser library created, checks the attested origin,
-// and answers the mint request with a fixed session.
+// and answers the mint request with a display grant for the keys it sent,
+// pinned to a fixed device profile (the ffos-user fixture FF1).
 package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +18,22 @@ import (
 )
 
 const expectedOrigin = "https://nft.example"
+
+// fixtureProfile is the public profile of FF1-FIXTURE1 from the ffos-user
+// control fixtures (clients/session-recipient/js/test/fixtures/ff1-control-v1/keys.json).
+var fixtureProfile = minter.DisplayGrantProfile{
+	Version: 1,
+	Dev:     "FF1-FIXTURE1",
+	Gen:     "772x9uI4OcVjB0inn2MHLA",
+	Sig:     json.RawMessage(`{"crv":"P-256","kty":"EC","x":"5jpANW8lLoNYtEBXDv2jPgpWd26B0qqVN2zZwUAfw64","y":"DT4WvFtjCo0h6XHTGMG7cmPVBYFqYFN3OYlIbUREyQg"}`),
+	Enc:     json.RawMessage(`{"crv":"P-256","kty":"EC","x":"m_DDu8fTpmS9lGeEuKDUpSXiFQCwMEXEOtlqtFxn_b0","y":"T-W2r4vBsiYSbwb7_C48ZPvr9yQufQZAvWQXsMpHGCU"}`),
+}
+
+// thumbprint is the RFC 7638 thumbprint of a P-256 JWK, the grant's ctl.
+func thumbprint(jwk minter.PublicJWK) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf(`{"crv":"P-256","kty":"EC","x":%q,"y":%q}`, jwk.X, jwk.Y)))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -66,11 +86,18 @@ func run() error {
 	if request.Origin != expectedOrigin {
 		return fmt.Errorf("unexpected request origin: %s", request.Origin)
 	}
-	_, err = channel.SendMintSuccess(ctx, *request, minter.MintResult{
-		SessionID:      "eps_go_integration",
-		Token:          "go-integration-browser-session-token",
-		ExpiresAt:      time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC),
-		RelayerBaseURL: "https://relayer.example",
+	keys, err := minter.ParseDisplayGrantKeys(request.DisplayGrant)
+	if err != nil {
+		return err
+	}
+	_, err = channel.SendMintSuccessResult(ctx, *request, minter.MintSuccess{
+		DisplayGrant: &minter.DisplayGrantResult{
+			Version:         1,
+			Ctl:             thumbprint(keys.SigJWK),
+			Profile:         fixtureProfile,
+			RelayV2Endpoint: "https://relay.example",
+			ExpiresAt:       time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
+		},
 	})
 	return err
 }

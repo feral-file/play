@@ -1,7 +1,8 @@
 import { expect, vi } from "vitest";
 import { decryptChannelMessage, encryptChannelMessage, exportPublicJwk, generateBrowserKeyPair } from "../src/crypto.js";
 import type { JsonValue } from "../src/canonicalJson.js";
-import type { TokenStorage } from "../src/client.js";
+import { thumb, type Jwk } from "./control-device.js";
+import { fixtureDevice } from "./fixtures.js";
 
 export type RequestRecord = {
   url: string;
@@ -9,6 +10,8 @@ export type RequestRecord = {
 };
 
 export const brokerBaseUrl = "https://pairing.example";
+/** The relay v2 endpoint the stub FF1 hands out in its grants. */
+export const relayV2Endpoint = "https://relay.example";
 
 export function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -36,23 +39,21 @@ export function authorizationHeader(init: RequestInit | undefined): string | nul
   return headers.get("authorization");
 }
 
-export function memoryStorage(): TokenStorage & { entries: Map<string, string> } {
-  const entries = new Map<string, string>();
-  return {
-    entries,
-    getItem: (key) => entries.get(key) ?? null,
-    setItem: (key, value) => {
-      entries.set(key, value);
-    },
-    removeItem: (key) => {
-      entries.delete(key);
-    }
-  };
-}
-
 export type ResultKind =
-  | { type: "mint_succeeded"; token?: string; sessionId?: string; expiresAt?: string | null; persistent?: boolean; requestMessageId?: string | null }
-  | { type: "mint_rejected"; requestMessageId?: string | null };
+  | {
+      type: "mint_succeeded";
+      /** Absent or null: the owner kept the site paired (no expiry). */
+      expiresAt?: string | null;
+      relayV2Endpoint?: string;
+      /** Override the ctl the grant names (a broker that swapped keys). */
+      ctl?: string;
+      /** Override the profile the grant pins. */
+      profile?: unknown;
+      /** Answer like firmware without display grants: a session and no displayGrant. */
+      legacySession?: boolean;
+      requestMessageId?: string | null;
+    }
+  | { type: "mint_rejected"; reason?: string; requestMessageId?: string | null };
 
 export type FakeBrokerOptions = {
   /** Waiting polls answered before the Art Computer shows up as the peer. */
@@ -91,16 +92,23 @@ export type SentMintRequest = {
   plaintext: Record<string, unknown>;
 };
 
+/** A display grant the stub FF1 issued: the ctl and the public signing key it was issued to. */
+export type IssuedGrant = { ctl: string; sig: Jwk };
+
 /**
- * A stubbed broker plus the Art Computer that joins the site's channel. Tokens
- * carry a `secret` marker so tests can assert none of them reaches an error.
+ * A stubbed broker plus the Art Computer that joins the site's channel. The
+ * Art Computer is the fixture FF1 (test/fixtures/ff1-control-v1/keys.json),
+ * so grants it issues pin that device's profile. Tokens carry a `secret`
+ * marker so tests can assert none of them reaches an error.
  */
 export async function fakeBroker(options: FakeBrokerOptions = {}) {
+  const device = fixtureDevice();
   const minterKeyPair = await generateBrowserKeyPair();
   const minterPublicKeyJwk = await exportPublicJwk(minterKeyPair.publicKey);
   const requests: RequestRecord[] = [];
   const channels: CreatedChannel[] = [];
   const mintRequests: SentMintRequest[] = [];
+  const issued: IssuedGrant[] = [];
   const closed: string[] = [];
   const pollsByChannel = new Map<string, number>();
   let networkFailures = options.networkFailures ?? 0;
@@ -123,8 +131,25 @@ export async function fakeBroker(options: FakeBrokerOptions = {}) {
       envelope: {},
       plaintext: {
         requestMessageId: announced["requestMessageId"],
-        browserPublicKeyJwk: channel.createBody["browserPublicKeyJwk"]
+        browserPublicKeyJwk: channel.createBody["browserPublicKeyJwk"],
+        displayGrant: announced["displayGrant"]
       }
+    };
+  }
+
+  function grantFor(request: SentMintRequest, result: Extract<ResultKind, { type: "mint_succeeded" }>): Record<string, JsonValue> {
+    const keys = request.plaintext["displayGrant"] as { sig: Jwk } | undefined;
+    if (keys === undefined) {
+      throw new Error("mint request carried no displayGrant keys");
+    }
+    const ctl = result.ctl ?? thumb(keys.sig);
+    issued.push({ ctl, sig: keys.sig });
+    return {
+      v: 1,
+      ctl,
+      profile: (result.profile ?? device.profile) as JsonValue,
+      relayV2Endpoint: result.relayV2Endpoint ?? relayV2Endpoint,
+      ...(result.expiresAt === undefined || result.expiresAt === null ? {} : { expiresAt: result.expiresAt })
     };
   }
 
@@ -135,22 +160,16 @@ export async function fakeBroker(options: FakeBrokerOptions = {}) {
       : result.requestMessageId;
     let plaintext: Record<string, JsonValue>;
     if (result.type === "mint_rejected") {
-      plaintext = { v: 1, type: "mint_rejected", channelId: channel.channelId, reason: "denied" };
-    } else {
-      const session: Record<string, JsonValue> = {
-        token: result.token ?? "browser-session-token-secret",
-        sessionId: result.sessionId ?? "sess_123",
-        relayerBaseUrl: "https://relayer.example"
+      plaintext = { v: 1, type: "mint_rejected", channelId: channel.channelId, reason: result.reason ?? "denied" };
+    } else if (result.legacySession === true) {
+      plaintext = {
+        v: 1,
+        type: "mint_succeeded",
+        channelId: channel.channelId,
+        session: { token: "browser-session-token-secret", sessionId: "sess_123", expiresAt: "2030-01-01T00:00:00.000Z" }
       };
-      if (result.persistent === true) {
-        session["persistent"] = true;
-      }
-      if (result.expiresAt !== undefined) {
-        session["expiresAt"] = result.expiresAt;
-      } else if (result.persistent !== true) {
-        session["expiresAt"] = "2030-01-01T00:00:00.000Z";
-      }
-      plaintext = { v: 1, type: "mint_succeeded", channelId: channel.channelId, session };
+    } else {
+      plaintext = { v: 1, type: "mint_succeeded", channelId: channel.channelId, displayGrant: grantFor(request, result) };
     }
     if (requestMessageId !== null) {
       plaintext["requestMessageId"] = requestMessageId;
@@ -273,7 +292,7 @@ export async function fakeBroker(options: FakeBrokerOptions = {}) {
     throw new Error(`unexpected request ${method} ${url}`);
   });
 
-  return { fetchImpl, requests, channels, mintRequests, closed, minterKeyPair, minterPublicKeyJwk };
+  return { fetchImpl, requests, channels, mintRequests, issued, closed, device, minterKeyPair, minterPublicKeyJwk };
 }
 
 export async function captureError(promise: Promise<unknown>): Promise<unknown> {
@@ -290,4 +309,3 @@ export function expectNoSecrets(error: unknown): void {
   const text = error instanceof Error ? `${error.name} ${error.message} ${String(error.stack)}` : String(error);
   expect(text).not.toMatch(/secret/);
 }
-
