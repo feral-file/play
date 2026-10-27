@@ -17,6 +17,12 @@ requester := channel.Requester()     // origin and browser info attested by the 
 
 The joined channel's `PollMintRequest`, `SendMintSuccess`, `SendMintRejection` and `Close` work as for a created channel; `PairingDisplay` is empty. `PollMintRequest` returns `ErrOriginMismatch` when the decrypted request names another origin than the attested one, and `ErrBrowserKeyMismatch` when it was encrypted with another browser key than the one returned at join. Broker failures are `*BrokerError` with the HTTP status and the broker's error code (`not_found`, `expired`, `unauthorized`, `rate_limited`, ...).
 
+## Display grants
+
+A requester from `@feralfile/play` 0.5.0 sends `displayGrant: {"v":1,"sig":<JWK>,"enc":<JWK>}` in both its create-call request and its encrypted `mint_request`. `MintRequest.DisplayGrant` carries that member raw (nil when absent) from `PollMintRequest` and from `JoinedMintRequest`; it is never validated there, so a malformed one never fails a poll or a join. `ParseDisplayGrantKeys` validates it when the host decides whether to issue a grant: each key must be a P-256 public EC JWK with exactly `kty`, `crv`, `x` and `y` on the curve, and every failure wraps `ErrInvalidDisplayGrant`.
+
+`SendMintSuccessResult(ctx, request, MintSuccess{Session, DisplayGrant})` sends a session, a display grant (`DisplayGrantResult`, the payload's top-level `displayGrant`), or both; a grant may only answer a request that sent `displayGrant`. `SendMintSuccess(ctx, request, MintResult)` is unchanged and sends the same bytes as before. `MintResult` JSON never carries a grant.
+
 ## Legacy device-initiated pairing
 
 `StartChannel` creates a channel and returns display material for the FF1 frontend; the site joins it. The broker still serves this path for requester library versions before 0.4.0.
