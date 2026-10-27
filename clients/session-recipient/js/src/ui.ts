@@ -1,5 +1,5 @@
 import qrcode from "qrcode-generator";
-import { displayDp1Playlist, tooManyCastsMessage, type DisplayDp1PlaylistOptions, type Dp1Playlist } from "./cast.js";
+import { displayDp1Playlist, pairingReplacedMessage, tooManyCastsMessage, type DisplayDp1PlaylistOptions, type Dp1Playlist } from "./cast.js";
 import {
   legacySessionStorageKey,
   readStoredEphemeralBrowserSession,
@@ -186,7 +186,9 @@ export function pairingErrorMessage(error: unknown): string {
       case "too_many_sites":
         return "Your Art Computer has as many paired sites as it allows. Remove one in the Feral File app first.";
       case "display_failed":
-        return error.message === tooManyCastsMessage ? error.message : "Could not reach your Art Computer. Check that it is online and try again.";
+        return error.message === tooManyCastsMessage || error.message === pairingReplacedMessage
+          ? error.message
+          : "Could not reach your Art Computer. Check that it is online and try again.";
       case "display_rejected":
         return "Your Art Computer refused the playlist.";
       default:
@@ -515,9 +517,9 @@ async function playFromButton(
     setStatus(options, status, "Playlist sent to Art Computer.");
     options.onSuccess?.();
   } catch (error) {
-    if (error instanceof PlayError && error.code === "session_rejected") {
-      clearStoredEphemeralBrowserSession(currentOriginForUi());
-    }
+    // session_rejected needs no clearing here: the library already deleted
+    // the rejected grant by its ctl, and an unconditional clear would remove
+    // a newer grant another tab stored meanwhile.
     if (error instanceof PlayError && error.code === "device_unrecognized") {
       state.pairAgain = true;
     }

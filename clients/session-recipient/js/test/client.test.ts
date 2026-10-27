@@ -473,6 +473,7 @@ describe("requestEphemeralSession", () => {
   it.each([
     { reason: "display_grant_unavailable", code: "device_unsupported" },
     { reason: "too_many_sites", code: "too_many_sites" },
+    { reason: "approval_expired", code: "approval_timeout" },
     { reason: "denied", code: "mint_rejected" },
     { reason: "something_new", code: "mint_rejected" }
   ])("maps a mint_rejected reason $reason to $code", async ({ reason, code }) => {

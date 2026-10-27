@@ -19,12 +19,14 @@ afterEach(() => {
   Reflect.deleteProperty(globalThis, "location");
 });
 
+/** The session the page holds; `seeded` points it at the grant it writes. */
+const session = { deviceId: "FF1-FIXTURE1", ctl: "", persistent: true };
+
 async function seeded(): Promise<{ ctl: string; sig: Jwk; grants: Record<string, Jwk> }> {
   const { record, sig } = await seedGrant(testOrigin);
+  session.ctl = record.ctl;
   return { ctl: record.ctl, sig, grants: { [record.ctl]: sig } };
 }
-
-const session = { deviceId: "FF1-FIXTURE1", ctl: "", persistent: true };
 
 describe("displayDp1Playlist over relay v2", () => {
   it("seals displayPlaylist in the Play shape under the stored keys, fans it out, and closes the socket", async () => {
@@ -188,6 +190,18 @@ describe("displayDp1Playlist over relay v2", () => {
     const error = await captureError(displayDp1Playlist({ session, playlist, socketFactory }));
     expect((error as PlayError).code).toBe("display_failed");
     expect(relay.ff1.seen).toHaveLength(0);
+    expect((await readStoredDisplayGrant(testOrigin))?.ctr).toBe(0);
+  });
+
+  it("refuses to cast with a session that is not the stored grant, leaving the newer grant alone", async () => {
+    const { grants } = await seeded();
+    const relay = deviceOnRelay(grants);
+    for (const stale of [{ ...session, ctl: "stale-ctl" }, { ...session, deviceId: "FF1-OTHER" }]) {
+      const error = await captureError(displayDp1Playlist({ session: stale, playlist, socketFactory: relay.socketFactory }));
+      expect((error as PlayError).code).toBe("display_failed");
+      expect((error as PlayError).message).toMatch(/replaced/);
+    }
+    expect(relay.sockets).toHaveLength(0);
     expect((await readStoredDisplayGrant(testOrigin))?.ctr).toBe(0);
   });
 

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import qrcode from "qrcode-generator";
-import { tooManyCastsMessage } from "../src/cast.js";
+import { pairingReplacedMessage, tooManyCastsMessage } from "../src/cast.js";
 import { PlayError } from "../src/errors.js";
 import {
   clearStoredEphemeralBrowserSession,
@@ -16,7 +16,7 @@ import {
   type PairingDialogOptions,
   type PairingMaterial
 } from "../src/index.js";
-import { readStoredDisplayGrant } from "../src/grantStore.js";
+import { readStoredDisplayGrant, replaceStoredDisplayGrant } from "../src/grantStore.js";
 import { brokerBaseUrl, captureError, expectNoSecrets, fakeBroker } from "./fakeBroker.js";
 import { fakeRelay } from "./fakeRelay.js";
 import { deviceOnRelay, resetIndexedDb, seedGrant } from "./grants.js";
@@ -288,6 +288,7 @@ describe("pairing dialog copy", () => {
     expect(pairingErrorMessage(new PlayError("cap", "too_many_sites"))).toContain("Remove one");
     expect(pairingErrorMessage(new PlayError("offline", "display_failed"))).toContain("Could not reach");
     expect(pairingErrorMessage(new PlayError(tooManyCastsMessage, "display_failed"))).toBe(tooManyCastsMessage);
+    expect(pairingErrorMessage(new PlayError(pairingReplacedMessage, "display_failed"))).toBe(pairingReplacedMessage);
     expect(pairingErrorMessage(new PlayError("refused", "display_rejected"))).toContain("refused");
     expect(pairingErrorMessage(new Error("channel create failed: 429"))).toBe("channel create failed: 429");
   });
@@ -713,6 +714,34 @@ describe("mountPlayOnArtComputerButton", () => {
     expect((failure as PlayError).code).toBe("session_rejected");
     expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
     expect(handle.element.textContent).toBe("Play on Art Computer");
+  });
+
+  it("does not clear a newer grant another tab stored when the old one is rejected", async () => {
+    const { record, sig } = await seedGrant(testOrigin);
+    const newer = await seedGrant("https://other.example");
+    const relay = deviceOnRelay({ [record.ctl]: sig }, () => {
+      // Another tab re-paired while this cast was in flight.
+      void replaceStoredDisplayGrant({ ...newer.record, origin: testOrigin });
+      return { ok: false, code: "access_revoked" };
+    });
+    const { document } = fakeDocumentWithContainer();
+    let failure: unknown;
+    const handle = mountPlayOnArtComputerButton({
+      container: "#play-button-container",
+      playlist,
+      brokerBaseUrl,
+      socketFactory: relay.socketFactory,
+      document,
+      onError: (error) => {
+        failure = error;
+      }
+    });
+
+    handle.element.click();
+    await waitFor(() => failure !== undefined);
+
+    expect((failure as PlayError).code).toBe("session_rejected");
+    expect((await readStoredDisplayGrant(testOrigin))?.ctl).toBe(newer.record.ctl);
   });
 
   it("offers Pair again on device_unrecognized and clears the grant only on the next click", async () => {

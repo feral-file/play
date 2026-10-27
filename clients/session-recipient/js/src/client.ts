@@ -370,7 +370,10 @@ function isMessageRole(value: string): value is MessageRole {
 /** The `mint_rejected` reasons the FF1 gives a 0.5 request, by error code. */
 const rejectionCodes: Record<string, PlayErrorCode> = {
   display_grant_unavailable: "device_unsupported",
-  too_many_sites: "too_many_sites"
+  too_many_sites: "too_many_sites",
+  // The FF1's own approval deadline (5 minutes) passed with no answer: the
+  // same event as this library's maxWaitMs, so the same code.
+  approval_expired: "approval_timeout"
 };
 
 /**
@@ -398,6 +401,9 @@ async function parseMintResult(value: unknown, channelId: string, requestMessage
     }
     if (code === "too_many_sites") {
       throw new PlayError("this FF1 has as many paired sites as it allows", code);
+    }
+    if (code === "approval_timeout") {
+      throw new PlayError("the FF1 stopped waiting for approval", code);
     }
     throw new PlayError("mint request rejected", "mint_rejected");
   }

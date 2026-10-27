@@ -18,6 +18,8 @@ export type DisplayDp1PlaylistOptions = {
 const defaultTimeoutMs = 30_000;
 /** Shown as-is by the wrapped button: the one display_failed a visitor can act on by waiting. */
 export const tooManyCastsMessage = "Too many casts at once from this network, or the relay is unreachable. Try again in a moment.";
+/** Shown as-is by the wrapped button: the page holds a pairing another tab has since replaced. */
+export const pairingReplacedMessage = "This page's pairing was replaced by a newer one. Reload the page and play again.";
 /** Bytes a request may carry before the relay's chunk pacing earns it more time. */
 const chunkSize = 32_768;
 /** A self-revoke is best effort: it gets a short deadline and its outcome is ignored. */
@@ -165,6 +167,12 @@ export async function displayDp1Playlist(options: DisplayDp1PlaylistOptions): Pr
   if (grantExpired(record)) {
     await deleteStoredDisplayGrant(origin, record.ctl);
     throw new PlayError("the display grant has expired", "session_rejected");
+  }
+  // The page casts only with the pairing it obtained: a stale page must not
+  // cast to whatever FF1 another tab has paired with since, and the newer
+  // grant is left alone (not session_rejected, which would clear it).
+  if (record.ctl !== options.session.ctl || record.deviceId !== options.session.deviceId) {
+    throw new PlayError(pairingReplacedMessage, "display_failed");
   }
   const req = { intent: { action: "now_display" }, dp1_call: options.playlist };
   const reserve = async (): Promise<number> => {
