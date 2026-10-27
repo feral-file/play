@@ -77,7 +77,7 @@ describe("ff1-control-v1 fixture inventory", () => {
     // 85 files at ffos-user 25d776c: keys.json + 20 positive + 64 negative.
     expect(positive).toHaveLength(20);
     expect(negative).toHaveLength(64);
-    // The display-grant vectors PR A added are present.
+    // The display-grant vectors (ffos-user docs/ff1-control-v1.md §5.7) are present.
     const names = [...positive, ...negative].map((fixture) => fixture.name);
     for (const name of ["cmd-display-displayPlaylist", "cmd-display-displayPlaylist-legacy", "cmd-display-self-revoke", "display-expired", "display-getDeviceStatus"]) {
       expect(names).toContain(name);

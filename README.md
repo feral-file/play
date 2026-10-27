@@ -31,7 +31,8 @@ expect change between 0.x versions, and open issues freely — integration
 feedback is exactly what this stage is for.
 
 Play pairs through the Mint Pairing Broker. From 0.5.0 it casts over relay v2
-with a display grant of the FF1 control protocol (feral-file/feral-file#3551);
+with a display grant of the FF1 control protocol (ffos-user
+`docs/ff1-control-v1.md` §5.7);
 the relay client and codec under `clients/session-recipient/js/src/control`
 are a port of the maintained ff-cli client, kept in step with it rather than
 diverging. 0.4 sites keep casting over the legacy `ff-relayer` `/api`
