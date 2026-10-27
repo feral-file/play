@@ -253,7 +253,16 @@ func joinedMintRequest(channelID string, response joinChannelResponse, browserIn
 		BrowserPublicKeyJWK:        *response.BrowserPublicKeyJWK,
 		RequestedExpiresInSeconds:  requestedExpiresInSeconds,
 		SupportsPersistentSessions: metadata.SupportsPersistentSessions,
+		DisplayGrant:               rawDisplayGrant(metadata.DisplayGrant),
 	}
+}
+
+// rawDisplayGrant treats a JSON null displayGrant as not sent.
+func rawDisplayGrant(raw json.RawMessage) json.RawMessage {
+	if string(raw) == "null" {
+		return nil
+	}
+	return raw
 }
 
 // Requester returns what the broker attested when this minter joined a
@@ -280,8 +289,10 @@ func (ch *Channel) Requester() JoinedRequester {
 // message. That is the model a joined channel already has for the browser key
 // (PollMintRequest refuses any request not encrypted with the key the broker
 // returned at join, and results are encrypted to that key), so the broker
-// remains the channel's key distributor, now also for the requested lifetime
-// and the persistent-session capability. The owner's approval still decides.
+// remains the channel's key distributor, now also for the requested lifetime,
+// the persistent-session capability and the display-grant keys (passed through
+// raw in DisplayGrant, as from PollMintRequest). The owner's approval still
+// decides.
 func (ch *Channel) JoinedMintRequest() (MintRequest, bool) {
 	if ch.joinedRequest == nil {
 		return MintRequest{}, false
@@ -339,11 +350,14 @@ func (ch *Channel) MinterPublicKeyJWK() PublicJWK {
 // On a joined channel a request that does not match what the broker attested is
 // refused: the error is ErrOriginMismatch or ErrBrowserKeyMismatch, and the
 // decrypted request (channel id, message id, seq, origin, browser info, sender
-// key; RequestedExpiresInSeconds unset) is returned alongside it so the host can
-// answer with SendMintRejection and tell the owner which request was refused.
-// The request is non-nil with an error only for those two errors, and it must
-// never be treated as approved or answered with SendMintSuccess. Every other
-// error returns a nil request.
+// key, raw display grant; RequestedExpiresInSeconds unset) is returned
+// alongside it so the host can answer with SendMintRejection and tell the owner
+// which request was refused. The request is non-nil with an error only for
+// those two errors, and it must never be treated as approved or answered with
+// SendMintSuccess. Every other error returns a nil request.
+//
+// The displayGrant member is not validated here: any JSON value is returned
+// raw in DisplayGrant and never makes the poll fail.
 func (ch *Channel) PollMintRequest(ctx context.Context, afterSeq int64) (*MintRequest, error) {
 	pollPath := "/v1/channels/" + pathEscape(ch.channelID) + "/messages"
 	query := url.Values{}
@@ -389,6 +403,7 @@ func (ch *Channel) PollMintRequest(ctx context.Context, afterSeq int64) (*MintRe
 			BrowserInfo:                decoded.BrowserInfo,
 			BrowserPublicKeyJWK:        remotePublicJWK,
 			SupportsPersistentSessions: decoded.SupportsPersistentSessions,
+			DisplayGrant:               rawDisplayGrant(decoded.DisplayGrant),
 		}
 		if ch.joined {
 			if !publicJWKMatches(remotePublicJWK, ch.joinedBrowserJWK) {
@@ -408,30 +423,56 @@ func (ch *Channel) PollMintRequest(ctx context.Context, afterSeq int64) (*MintRe
 	return nil, nil
 }
 
-// SendMintSuccess encrypts a host-created session result for the requester.
+// SendMintSuccess encrypts a host-created session result for the requester. It
+// is SendMintSuccessResult with a session and no display grant, and sends the
+// same bytes it did before display grants existed.
 func (ch *Channel) SendMintSuccess(ctx context.Context, request MintRequest, result MintResult) (*SendMessageResult, error) {
-	if result.Token == "" {
-		return nil, errors.New("mint result token is required")
+	return ch.SendMintSuccessResult(ctx, request, MintSuccess{Session: &result})
+}
+
+// SendMintSuccessResult encrypts a success carrying a session, a display grant,
+// or both. The grant is the payload's top-level displayGrant member, never part
+// of the session; it may only answer a request that sent displayGrant keys,
+// since older requesters cannot read it. The device sends grant-only to keyed
+// (0.5) requests; the library permits both.
+func (ch *Channel) SendMintSuccessResult(ctx context.Context, request MintRequest, success MintSuccess) (*SendMessageResult, error) {
+	if success.Session == nil && success.DisplayGrant == nil {
+		return nil, errors.New("mint success needs a session or a display grant")
 	}
-	if result.Persistent && !request.SupportsPersistentSessions {
-		return nil, errors.New("mint result cannot be persistent: the requester did not declare supportsPersistentSessions, send a timed session instead")
-	}
-	if !result.Persistent && result.ExpiresAt.IsZero() {
-		return nil, errors.New("mint result expiresAt is required unless the session is persistent")
-	}
-	return ch.sendEncryptedResult(ctx, request, mintSuccessPlaintext{
+	plaintext := mintSuccessPlaintext{
 		Version:          1,
 		Type:             messageTypeMintSucceeded,
 		ChannelID:        ch.channelID,
 		RequestMessageID: request.MessageID,
-		Session: mintSessionPlaintext{
+	}
+	if result := success.Session; result != nil {
+		if result.Token == "" {
+			return nil, errors.New("mint result token is required")
+		}
+		if result.Persistent && !request.SupportsPersistentSessions {
+			return nil, errors.New("mint result cannot be persistent: the requester did not declare supportsPersistentSessions, send a timed session instead")
+		}
+		if !result.Persistent && result.ExpiresAt.IsZero() {
+			return nil, errors.New("mint result expiresAt is required unless the session is persistent")
+		}
+		plaintext.Session = &mintSessionPlaintext{
 			SessionID:      result.SessionID,
 			Token:          result.Token,
 			ExpiresAt:      result.expiresAt(),
 			Persistent:     result.Persistent,
 			RelayerBaseURL: result.RelayerBaseURL,
-		},
-	})
+		}
+	}
+	if grant := success.DisplayGrant; grant != nil {
+		if len(request.DisplayGrant) == 0 {
+			return nil, errors.New("display grant cannot answer a requester that sent no displayGrant keys")
+		}
+		if err := grant.validate(); err != nil {
+			return nil, err
+		}
+		plaintext.DisplayGrant = grant
+	}
+	return ch.sendEncryptedResult(ctx, request, plaintext)
 }
 
 // SendMintRejection encrypts an application-level rejection for the requester.

@@ -81,6 +81,12 @@ type BrowserInfo struct {
 // capability, including every browser client before @feralfile/play 0.3.0:
 // those pages require a string expiresAt and cannot hold a session without one.
 // Only a request with it set may be answered with a persistent result.
+//
+// DisplayGrant is the requester's displayGrant member exactly as sent, or nil
+// when it sent none or sent null (both mean a 0.4 request). It is never validated here, so a malformed one never fails
+// a poll or a join: a requester that sends the member at all is asking for a
+// display grant (@feralfile/play 0.5.0 and later), and the host reads its keys
+// with ParseDisplayGrantKeys.
 type MintRequest struct {
 	ChannelID                  string
 	MessageID                  string
@@ -88,8 +94,16 @@ type MintRequest struct {
 	Origin                     string
 	BrowserInfo                BrowserInfo
 	BrowserPublicKeyJWK        PublicJWK
-	RequestedExpiresInSeconds  int  `json:"requestedExpiresInSeconds,omitempty"`
-	SupportsPersistentSessions bool `json:"supportsPersistentSessions,omitempty"`
+	RequestedExpiresInSeconds  int             `json:"requestedExpiresInSeconds,omitempty"`
+	SupportsPersistentSessions bool            `json:"supportsPersistentSessions,omitempty"`
+	DisplayGrant               json.RawMessage `json:"displayGrant,omitempty"`
+}
+
+// MintSuccess is the result SendMintSuccessResult sends: a session, a display
+// grant, or both. At least one is required.
+type MintSuccess struct {
+	Session      *MintResult
+	DisplayGrant *DisplayGrantResult
 }
 
 // MintResult is the host-created browser session returned to the browser only
@@ -199,14 +213,21 @@ type mintRequestPlaintext struct {
 	// owner-kept sessions, so it decodes to false and they keep getting the
 	// timed session shape they can parse.
 	SupportsPersistentSessions bool `json:"supportsPersistentSessions,omitempty"`
+	// DisplayGrant stays raw so a malformed member never fails the decode; see
+	// MintRequest.DisplayGrant.
+	DisplayGrant json.RawMessage `json:"displayGrant,omitempty"`
 }
 
+// mintSuccessPlaintext keeps session before displayGrant and omits whichever is
+// absent, so a session-only result is byte-identical to the shape before
+// display grants.
 type mintSuccessPlaintext struct {
-	Version          int                  `json:"v"`
-	Type             string               `json:"type"`
-	ChannelID        string               `json:"channelId"`
-	RequestMessageID string               `json:"requestMessageId,omitempty"`
-	Session          mintSessionPlaintext `json:"session"`
+	Version          int                   `json:"v"`
+	Type             string                `json:"type"`
+	ChannelID        string                `json:"channelId"`
+	RequestMessageID string                `json:"requestMessageId,omitempty"`
+	Session          *mintSessionPlaintext `json:"session,omitempty"`
+	DisplayGrant     *DisplayGrantResult   `json:"displayGrant,omitempty"`
 }
 
 // mintSessionPlaintext is the session shape the browser requester parses. A null
@@ -282,6 +303,8 @@ type joinedMintRequestMetadata struct {
 	RequestedExpiresInSeconds  json.Number `json:"requestedExpiresInSeconds,omitempty"`
 	SupportsPersistentSessions bool        `json:"supportsPersistentSessions,omitempty"`
 	RequestedAt                string      `json:"requestedAt,omitempty"`
+	// DisplayGrant stays raw, as in mintRequestPlaintext.
+	DisplayGrant json.RawMessage `json:"displayGrant,omitempty"`
 }
 
 type pollMessagesResponse struct {
