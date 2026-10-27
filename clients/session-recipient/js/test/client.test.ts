@@ -1,31 +1,31 @@
+import { readFileSync, readdirSync } from "node:fs";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  displayDp1Playlist,
-  ephemeralBrowserSessionStorageKey,
+  legacySessionStorageKey,
   maxRequestedExpiresInSeconds,
   readStoredEphemeralBrowserSession,
   requestEphemeralSession,
-  storeEphemeralBrowserSession,
   type EphemeralBrowserSession,
-  type RequestEphemeralSessionOptions,
-  type TokenStorage
+  type RequestEphemeralSessionOptions
 } from "../src/client.js";
 import { base64UrlDecode, decryptChannelMessage, generateBrowserKeyPair } from "../src/crypto.js";
+import { PlayError } from "../src/errors.js";
+import { readStoredDisplayGrant, replaceStoredDisplayGrant } from "../src/grantStore.js";
+import { fakeRelay } from "./fakeRelay.js";
+import type { PairingMaterial } from "../src/pairingPayload.js";
+import { thumb, type Jwk } from "./control-device.js";
 import {
-  authorizationHeader,
   brokerBaseUrl,
   captureError,
   expectNoSecrets,
   fakeBroker,
   jsonResponse,
-  memoryStorage,
-  requestBody,
   requestUrl,
   type FakeBrokerOptions,
   type ResultKind
 } from "./fakeBroker.js";
-import { PlayError } from "../src/errors.js";
-import type { PairingMaterial } from "../src/pairingPayload.js";
+import { deviceOnRelay, resetIndexedDb, seedGrant } from "./grants.js";
 
 const testOrigin = "https://nft.example";
 const algorithmName = "P256-HKDF-SHA256-AES-256-GCM";
@@ -33,6 +33,7 @@ let previousLocationDescriptor: PropertyDescriptor | undefined;
 let previousFetchDescriptor: PropertyDescriptor | undefined;
 
 beforeEach(() => {
+  resetIndexedDb();
   previousLocationDescriptor = Object.getOwnPropertyDescriptor(globalThis, "location");
   previousFetchDescriptor = Object.getOwnPropertyDescriptor(globalThis, "fetch");
   Object.defineProperty(globalThis, "location", {
@@ -58,7 +59,6 @@ afterEach(() => {
 function baseOptions(fetchImpl: typeof fetch, overrides: Partial<RequestEphemeralSessionOptions> = {}): RequestEphemeralSessionOptions {
   return {
     brokerBaseUrl,
-    storage: false,
     pollIntervalMs: 1,
     fetchImpl,
     ...overrides
@@ -69,11 +69,9 @@ function baseOptions(fetchImpl: typeof fetch, overrides: Partial<RequestEphemera
 async function runMintFlow(input: {
   requestedExpiresInSeconds?: number;
   result?: ResultKind;
-  storage?: TokenStorage;
 } = {}): Promise<{ session: EphemeralBrowserSession; mintRequest: Record<string, unknown> }> {
   const broker = await fakeBroker(input.result === undefined ? {} : { result: input.result });
   const session = await requestEphemeralSession(baseOptions(broker.fetchImpl, {
-    storage: input.storage === undefined ? false : { storage: input.storage },
     ...(input.requestedExpiresInSeconds === undefined ? {} : { requestedExpiresInSeconds: input.requestedExpiresInSeconds })
   }));
   const mintRequest = broker.mintRequests[0]?.plaintext;
@@ -82,6 +80,8 @@ async function runMintFlow(input: {
   }
   return { session, mintRequest };
 }
+
+const strippedJwk = { kty: "EC", crv: "P-256", x: expect.any(String) as unknown, y: expect.any(String) as unknown };
 
 describe("requestEphemeralSession", () => {
   it("calls the default global fetch with the global receiver", async () => {
@@ -95,21 +95,19 @@ describe("requestEphemeralSession", () => {
       value: receiverCheckedFetch
     });
 
-    const session = await requestEphemeralSession({ brokerBaseUrl, storage: false, pollIntervalMs: 1 });
+    const session = await requestEphemeralSession({ brokerBaseUrl, pollIntervalMs: 1 });
 
-    expect(session.sessionId).toBe("sess_123");
+    expect(session.deviceId).toBe("FF1-FIXTURE1");
     expect(receiverCheckedFetch).toHaveBeenCalledTimes(5);
   });
 
-  it("creates a browser channel, hands out pairing material, waits for the peer, and stores the session by origin", async () => {
+  it("creates a browser channel, hands out pairing material, waits for the peer, and stores the grant with its keys by origin", async () => {
     const broker = await fakeBroker({ waitingPolls: 2 });
-    const storage = memoryStorage();
     const materials: PairingMaterial[] = [];
     const onPeerJoined = vi.fn();
 
     const session = await requestEphemeralSession(baseOptions(broker.fetchImpl, {
       browserInfo: { name: "Test Browser", label: "Test Gallery" },
-      storage: { storage },
       onPairingMaterial: (material) => {
         expect(onPeerJoined).not.toHaveBeenCalled();
         materials.push(material);
@@ -117,13 +115,21 @@ describe("requestEphemeralSession", () => {
       onPeerJoined
     }));
 
-    expect(session).toEqual({
-      token: "browser-session-token-secret",
-      sessionId: "sess_123",
-      expiresAt: "2030-01-01T00:00:00.000Z",
-      relayerBaseUrl: "https://relayer.example"
+    const issued = broker.issued[0];
+    expect(session).toEqual({ deviceId: "FF1-FIXTURE1", ctl: issued?.ctl, persistent: true });
+    const stored = await readStoredDisplayGrant(testOrigin);
+    expect(stored).toMatchObject({
+      origin: testOrigin,
+      deviceId: "FF1-FIXTURE1",
+      ctl: issued?.ctl,
+      relayV2Endpoint: "https://relay.example",
+      persistent: true,
+      ctr: 0
     });
-    expect(storage.entries.has(ephemeralBrowserSessionStorageKey(testOrigin))).toBe(true);
+    expect(stored?.profile.dev).toBe("FF1-FIXTURE1");
+    expect(stored?.sigKey.extractable).toBe(false);
+    expect(stored?.encKey.extractable).toBe(false);
+    expect(await readStoredDisplayGrant("https://other.example")).toBeUndefined();
     expect(materials).toEqual([{
       appLink: "https://link.feralfile.com/pair?channel=ch_1&token=pt_secret_1",
       shortCode: "123451",
@@ -142,7 +148,8 @@ describe("requestEphemeralSession", () => {
         v: 1,
         requestMessageId: expect.stringMatching(/^msg_/) as unknown,
         supportsPersistentSessions: true,
-        requestedAt: expect.any(String) as unknown
+        requestedAt: expect.any(String) as unknown,
+        displayGrant: { v: 1, sig: strippedJwk, enc: strippedJwk }
       },
       idleTtlSeconds: 300,
       shortCodeRequested: true
@@ -157,6 +164,27 @@ describe("requestEphemeralSession", () => {
       "GET https://pairing.example/v1/channels/ch_1/messages?afterSeq=0"
     ]);
     expect(broker.closed).toEqual([]);
+  });
+
+  it("sends the same stripped display-grant keys in the announced and the encrypted request, under the 1 KiB broker cap", async () => {
+    const broker = await fakeBroker();
+    await requestEphemeralSession(baseOptions(broker.fetchImpl, { requestedExpiresInSeconds: maxRequestedExpiresInSeconds }));
+    const announced = broker.channels[0]?.createBody["mintRequest"] as Record<string, unknown>;
+    const encrypted = broker.mintRequests[0]?.plaintext["displayGrant"] as { v: number; sig: Jwk; enc: Jwk };
+    expect(encrypted).toEqual(announced["displayGrant"]);
+    expect(Object.keys(encrypted.sig).sort()).toEqual(["crv", "kty", "x", "y"]);
+    expect(Object.keys(encrypted.enc).sort()).toEqual(["crv", "kty", "x", "y"]);
+    expect(encrypted.sig).not.toEqual(encrypted.enc);
+    // The grant is issued to thumb(sig), which the library must agree on.
+    expect(thumb(encrypted.sig)).toBe((await readStoredDisplayGrant(testOrigin))?.ctl);
+    expect(new TextEncoder().encode(JSON.stringify(announced)).length).toBeLessThanOrEqual(1024);
+  });
+
+  it("generates fresh grant keys for every pairing attempt", async () => {
+    const broker = await fakeBroker({ expiredChannels: 1 });
+    await requestEphemeralSession(baseOptions(broker.fetchImpl, { channelRegenerations: 1 }));
+    const keysOf = (index: number): unknown => (broker.channels[index]?.createBody["mintRequest"] as Record<string, unknown>)["displayGrant"];
+    expect(keysOf(0)).not.toEqual(keysOf(1));
   });
 
   it("encrypts the mint request to the joined peer with the channel-bound AAD and the browser key it created the channel with", async () => {
@@ -192,7 +220,8 @@ describe("requestEphemeralSession", () => {
       supportsPersistentSessions: true,
       requestedExpiresInSeconds: 600,
       browserPublicKeyJwk: createdKey,
-      requestedAt: expect.any(String) as unknown
+      requestedAt: expect.any(String) as unknown,
+      displayGrant: { v: 1, sig: strippedJwk, enc: strippedJwk }
     });
 
     // Only the minter key the broker reported as the peer can open it.
@@ -237,7 +266,7 @@ describe("requestEphemeralSession", () => {
   it("keeps polling through a network failure while waiting for the peer", async () => {
     const broker = await fakeBroker({ networkFailures: 2 });
     const session = await requestEphemeralSession(baseOptions(broker.fetchImpl));
-    expect(session.sessionId).toBe("sess_123");
+    expect(session.deviceId).toBe("FF1-FIXTURE1");
   });
 
   it("rejects a peer that is not the minter", async () => {
@@ -298,24 +327,22 @@ describe("requestEphemeralSession", () => {
     expect(broker.closed).toEqual(["ch_1"]);
   });
 
-  it("collects a session the Art Computer delivered while the page was suspended past its local deadline", async () => {
+  it("collects a grant the Art Computer delivered while the page was suspended past its local deadline", async () => {
     // The device joined and answered the announced request while the page
     // slept; the broker renewed the channel. The page wakes 16 s after a 15 s
     // channel was created and must read the result, not abandon the channel.
     const broker = await fakeBroker({ answersFromCreate: true, waitingPolls: 0 });
-    const storage = memoryStorage();
     const realNow = Date.now.bind(Date);
     let skewMs = 0;
     vi.spyOn(Date, "now").mockImplementation(() => realNow() + skewMs);
     const session = await requestEphemeralSession(baseOptions(broker.fetchImpl, {
       idleTtlSeconds: 15,
-      storage: { storage },
       onPairingMaterial: () => {
         skewMs = 16_000;
       }
     }));
-    expect(session.token).toBe("browser-session-token-secret");
-    expect(storage.entries.has(ephemeralBrowserSessionStorageKey(testOrigin))).toBe(true);
+    expect(session.ctl).toBe(broker.issued[0]?.ctl);
+    expect(await readStoredDisplayGrant(testOrigin)).toBeDefined();
     expect(broker.closed).toEqual([]);
     expect(broker.channels).toHaveLength(1);
   });
@@ -323,7 +350,7 @@ describe("requestEphemeralSession", () => {
   it("does the final peer check after a poll that stalled until the local deadline", async () => {
     // The first poll hangs; the device joins and delivers meanwhile. When the
     // deadline aborts the hung poll, the page must look once more, not delete
-    // the channel with an approved session on it.
+    // the channel with an approved grant on it.
     const broker = await fakeBroker({ answersFromCreate: true, waitingPolls: 0, stalledPolls: 1 });
     const realNow = Date.now.bind(Date);
     let skewMs = 0;
@@ -335,7 +362,7 @@ describe("requestEphemeralSession", () => {
         skewMs = 14_980; // the hung poll is cut off ~20 ms later
       }
     }));
-    expect(session.token).toBe("browser-session-token-secret");
+    expect(session.ctl).toBe(broker.issued[0]?.ctl);
     expect(broker.closed).toEqual([]);
     expect(broker.channels).toHaveLength(1);
   });
@@ -366,7 +393,7 @@ describe("requestEphemeralSession", () => {
       channelRegenerations: 2,
       onPairingMaterial: (material) => materials.push(material)
     }));
-    expect(session.sessionId).toBe("sess_123");
+    expect(session.deviceId).toBe("FF1-FIXTURE1");
     expect(materials.map((material) => material.appLink)).toEqual([
       "https://link.feralfile.com/pair?channel=ch_1&token=pt_secret_1",
       "https://link.feralfile.com/pair?channel=ch_2&token=pt_secret_2"
@@ -438,10 +465,30 @@ describe("requestEphemeralSession", () => {
   });
 
   it("maps a declined approval to mint_rejected without storing", async () => {
-    const storage = memoryStorage();
-    const error = await captureError(runMintFlow({ result: { type: "mint_rejected" }, storage }));
+    const error = await captureError(runMintFlow({ result: { type: "mint_rejected" } }));
     expect((error as PlayError).code).toBe("mint_rejected");
-    expect(storage.entries.size).toBe(0);
+    expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
+  });
+
+  it.each([
+    { reason: "display_grant_unavailable", code: "device_unsupported" },
+    { reason: "too_many_sites", code: "too_many_sites" },
+    { reason: "approval_expired", code: "approval_timeout" },
+    { reason: "denied", code: "mint_rejected" },
+    { reason: "something_new", code: "mint_rejected" }
+  ])("maps a mint_rejected reason $reason to $code", async ({ reason, code }) => {
+    const error = await captureError(runMintFlow({ result: { type: "mint_rejected", reason } }));
+    expect((error as PlayError).code).toBe(code);
+    expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
+  });
+
+  it("throws device_unsupported for a mint_succeeded without a displayGrant and discards the session", async () => {
+    // Firmware without display grants ignores the keys and mints a session.
+    const error = await captureError(runMintFlow({ result: { type: "mint_succeeded", legacySession: true } }));
+    expect((error as PlayError).code).toBe("device_unsupported");
+    expectNoSecrets(error);
+    expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
+    expect(globalThis.localStorage).toBeUndefined();
   });
 
   it.each([
@@ -450,32 +497,46 @@ describe("requestEphemeralSession", () => {
     { type: "mint_rejected", name: "omits requestMessageId", requestMessageId: null },
     { type: "mint_rejected", name: "uses a mismatched requestMessageId", requestMessageId: "msg_wrong_request" }
   ] as const)("rejects a decrypted $type result that $name", async ({ type, requestMessageId }) => {
-    const storage = memoryStorage();
-    await expect(runMintFlow({ result: { type, requestMessageId }, storage })).rejects.toThrow("mint result invalid");
-    expect(storage.entries.size).toBe(0);
+    await expect(runMintFlow({ result: { type, requestMessageId } })).rejects.toThrow("mint result invalid");
+    expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
   });
 
   it.each([
     { name: "malformed", expiresAt: "not-a-date" },
     { name: "already expired", expiresAt: "2000-01-01T00:00:00.000Z" }
-  ])("rejects a decrypted mint_succeeded result with $name expiresAt without storing", async ({ expiresAt }) => {
-    const storage = memoryStorage();
-    await expect(runMintFlow({ result: { type: "mint_succeeded", expiresAt }, storage })).rejects.toThrow("mint result invalid");
-    expect(storage.entries.size).toBe(0);
+  ])("rejects a grant with $name expiresAt without storing", async ({ expiresAt }) => {
+    await expect(runMintFlow({ result: { type: "mint_succeeded", expiresAt } })).rejects.toThrow("mint result invalid");
+    expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
   });
 
-  it("declares support for owner-kept sessions in every mint request", async () => {
+  it.each([
+    { name: "a ctl that is not the thumbprint of the keys it sent", result: { ctl: "S2bVJ1g34d-xMnRk7wxaTtosj_vyZVYY4ywk4R4UEDY" } },
+    { name: "a profile with an extra member", result: { profile: { v: 1, dev: "FF1-FIXTURE1", gen: "772x9uI4OcVjB0inn2MHLA", sig: {}, enc: {}, extra: 1 } } },
+    { name: "a profile whose key carries a private member", result: { profile: undefined } },
+    { name: "a relay endpoint with a path", result: { relayV2Endpoint: "https://relay.example/v2" } },
+    { name: "a plaintext ws: relay endpoint", result: { relayV2Endpoint: "ws://relay.example" } },
+    { name: "a plaintext http: relay endpoint", result: { relayV2Endpoint: "http://relay.example" } },
+    { name: "a relay endpoint with credentials", result: { relayV2Endpoint: "https://user:pw@relay.example" } }
+  ])("rejects a grant with $name without storing", async ({ result }) => {
+    const broker = await fakeBroker();
+    const profile = result.profile === undefined && "profile" in result ? { ...broker.device.profile, sig: broker.device.sig } : result.profile;
+    const withBroker = await fakeBroker({ result: { type: "mint_succeeded", ...result, ...(profile === undefined ? {} : { profile }) } });
+    await expect(requestEphemeralSession(baseOptions(withBroker.fetchImpl))).rejects.toThrow("mint result invalid");
+    expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
+  });
+
+  it("declares support for owner-kept grants in every mint request", async () => {
     const { mintRequest } = await runMintFlow();
     expect(mintRequest["supportsPersistentSessions"]).toBe(true);
   });
 
-  it("sends the requested session lifetime in the mint request when set", async () => {
+  it("sends the requested lifetime in the mint request when set", async () => {
     const { mintRequest } = await runMintFlow({ requestedExpiresInSeconds: 3600 });
     expect(mintRequest["type"]).toBe("mint_request");
     expect(mintRequest["requestedExpiresInSeconds"]).toBe(3600);
   });
 
-  it("omits the requested session lifetime when unset", async () => {
+  it("omits the requested lifetime when unset", async () => {
     const { mintRequest } = await runMintFlow();
     expect(mintRequest["type"]).toBe("mint_request");
     expect(mintRequest).not.toHaveProperty("requestedExpiresInSeconds");
@@ -495,19 +556,19 @@ describe("requestEphemeralSession", () => {
       requestMessageId: sent.envelope["messageId"],
       supportsPersistentSessions: true,
       requestedExpiresInSeconds: 600,
-      requestedAt: sent.plaintext["requestedAt"]
+      requestedAt: sent.plaintext["requestedAt"],
+      displayGrant: sent.plaintext["displayGrant"]
     });
     expect(sent.plaintext["requestMessageId"]).toBe(announced["requestMessageId"]);
   });
 
   it("collects an answer the Art Computer gave from the announced request before the page sent its copy", async () => {
     const broker = await fakeBroker({ answersFromCreate: true, waitingPolls: 2 });
-    const storage = memoryStorage();
 
-    const session = await requestEphemeralSession(baseOptions(broker.fetchImpl, { storage: { storage } }));
+    const session = await requestEphemeralSession(baseOptions(broker.fetchImpl));
 
-    expect(session.token).toBe("browser-session-token-secret");
-    expect(storage.entries.has(ephemeralBrowserSessionStorageKey(testOrigin))).toBe(true);
+    expect(session.ctl).toBe(broker.issued[0]?.ctl);
+    expect(await readStoredDisplayGrant(testOrigin)).toBeDefined();
     // The encrypted copy still goes out for devices that predate announcing,
     // and the answer is read from the start of the channel.
     expect(broker.mintRequests).toHaveLength(1);
@@ -515,7 +576,7 @@ describe("requestEphemeralSession", () => {
     expect(urls.at(-1)).toBe("GET https://pairing.example/v1/channels/ch_1/messages?afterSeq=0");
   });
 
-  it("sends the maximum requested session lifetime", async () => {
+  it("sends the maximum requested lifetime", async () => {
     const { mintRequest } = await runMintFlow({ requestedExpiresInSeconds: maxRequestedExpiresInSeconds });
     expect(mintRequest["requestedExpiresInSeconds"]).toBe(31_536_000);
   });
@@ -529,26 +590,23 @@ describe("requestEphemeralSession", () => {
     2 ** 53,
     1e21,
     Number.POSITIVE_INFINITY
-  ])("rejects a requested session lifetime of %s", async (requestedExpiresInSeconds) => {
+  ])("rejects a requested lifetime of %s", async (requestedExpiresInSeconds) => {
     await expect(runMintFlow({ requestedExpiresInSeconds })).rejects.toThrow("requestedExpiresInSeconds must be a whole number of seconds from 1 to 31536000");
+  });
+
+  it("keeps a timed grant with its expiry", async () => {
+    const { session } = await runMintFlow({ result: { type: "mint_succeeded", expiresAt: "2030-01-01T00:00:00.000Z" } });
+    expect(session).toEqual({ deviceId: "FF1-FIXTURE1", ctl: session.ctl, expiresAt: "2030-01-01T00:00:00.000Z", persistent: false });
+    expect(await readStoredEphemeralBrowserSession(testOrigin)).toEqual(session);
   });
 
   it.each([
     { name: "omits expiresAt", expiresAt: undefined },
     { name: "sends a null expiresAt", expiresAt: null }
-  ])("keeps an owner-kept session that $name", async ({ expiresAt }) => {
-    const storage = memoryStorage();
-    const { session } = await runMintFlow({
-      result: { type: "mint_succeeded", persistent: true, ...(expiresAt === undefined ? {} : { expiresAt }) },
-      storage
-    });
-    expect(session).toEqual({
-      token: "browser-session-token-secret",
-      sessionId: "sess_123",
-      persistent: true,
-      relayerBaseUrl: "https://relayer.example"
-    });
-    expect(readStoredEphemeralBrowserSession(storage, testOrigin)).toEqual(session);
+  ])("keeps an owner-kept grant that $name", async ({ expiresAt }) => {
+    const { session } = await runMintFlow({ result: { type: "mint_succeeded", ...(expiresAt === undefined ? {} : { expiresAt }) } });
+    expect(session).toEqual({ deviceId: "FF1-FIXTURE1", ctl: session.ctl, persistent: true });
+    expect(await readStoredEphemeralBrowserSession(testOrigin)).toEqual(session);
   });
 
   it("does not leak a token from a malformed broker response", async () => {
@@ -684,7 +742,7 @@ describe("requestEphemeralSession", () => {
       channelRegenerations: 1,
       onPairingMaterial: (material) => materials.push(material)
     }));
-    expect(session.sessionId).toBe("sess_123");
+    expect(session.deviceId).toBe("FF1-FIXTURE1");
     expect(materials.map((material) => material.shortCode)).toEqual(["123451", "123452"]);
     expect(broker.mintRequests.map((request) => request.channelId)).toEqual(["ch_2"]);
   });
@@ -703,7 +761,7 @@ describe("requestEphemeralSession", () => {
       return response;
     });
     const session = await requestEphemeralSession(baseOptions(fetchImpl, { idleTtlSeconds: 15 }));
-    expect(session.sessionId).toBe("sess_123");
+    expect(session.deviceId).toBe("FF1-FIXTURE1");
   });
 
   it("does not post the mint_request when the visitor cancels during encryption", async () => {
@@ -723,7 +781,6 @@ describe("requestEphemeralSession", () => {
 
   it("honours a cancel that lands while the result is being read, without storing", async () => {
     const broker = await fakeBroker();
-    const storage = memoryStorage();
     const controller = new AbortController();
     const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
       const response = await broker.fetchImpl(input, init);
@@ -732,22 +789,93 @@ describe("requestEphemeralSession", () => {
       }
       return response;
     });
-    const error = await captureError(requestEphemeralSession(baseOptions(fetchImpl, { storage: { storage }, signal: controller.signal })));
+    const error = await captureError(requestEphemeralSession(baseOptions(fetchImpl, { signal: controller.signal })));
     expect((error as PlayError).code).toBe("pairing_canceled");
-    expect(storage.entries.size).toBe(0);
+    expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
   });
 
-  it("returns a stored session without creating a channel", async () => {
+  it("returns a stored grant without creating a channel", async () => {
     const broker = await fakeBroker();
-    const storage = memoryStorage();
-    storeEphemeralBrowserSession(storage, testOrigin, { token: "token-stored", sessionId: "sess_stored", expiresAt: "2030-01-01T00:00:00.000Z" });
-    const session = await requestEphemeralSession(baseOptions(broker.fetchImpl, { storage: { storage } }));
-    expect(session.sessionId).toBe("sess_stored");
+    const { record } = await seedGrant(testOrigin);
+    const session = await requestEphemeralSession(baseOptions(broker.fetchImpl));
+    expect(session).toEqual({ deviceId: "FF1-FIXTURE1", ctl: record.ctl, persistent: true });
     expect(broker.fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("removes a stored 0.4 session record on first use, so the site pairs once more", async () => {
+    const entries = new Map<string, string>([
+      [legacySessionStorageKey(testOrigin), JSON.stringify({ token: "token-secret", sessionId: "sess_old", origin: testOrigin })],
+      [legacySessionStorageKey("https://other.example"), "kept"]
+    ]);
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: { removeItem: (key: string) => entries.delete(key) }
+    });
+    try {
+      const broker = await fakeBroker();
+      const session = await requestEphemeralSession(baseOptions(broker.fetchImpl));
+      expect(session.deviceId).toBe("FF1-FIXTURE1");
+      expect(broker.channels).toHaveLength(1);
+      expect([...entries.keys()]).toEqual([legacySessionStorageKey("https://other.example")]);
+    } finally {
+      Reflect.deleteProperty(globalThis, "localStorage");
+    }
+  });
+
+  it("re-pairs past a stored grant's expiry and replaces it without revoking the expired grant", async () => {
+    const { record: old } = await seedGrant(testOrigin, { expiresAt: "2000-01-01T00:00:00.000Z", persistent: false, ctr: 5 });
+    const relay = fakeRelay({ peers: [] });
+    const broker = await fakeBroker();
+
+    const session = await requestEphemeralSession(baseOptions(broker.fetchImpl, { socketFactory: relay.socketFactory }));
+
+    expect(session.ctl).not.toBe(old.ctl);
+    expect((await readStoredDisplayGrant(testOrigin))?.ctl).toBe(session.ctl);
+    // An expired grant is dead on the device already: nothing to revoke.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(relay.sockets).toHaveLength(0);
+  });
+
+  it("accepts a wss: relay endpoint", async () => {
+    const broker = await fakeBroker({ result: { type: "mint_succeeded", relayV2Endpoint: "wss://relay.example" } });
+    await requestEphemeralSession(baseOptions(broker.fetchImpl));
+    expect((await readStoredDisplayGrant(testOrigin))?.relayV2Endpoint).toBe("wss://relay.example");
+  });
+
+  it("revokes the grant another tab stored meanwhile, not the one read at the start", async () => {
+    await seedGrant(testOrigin, { expiresAt: "2000-01-01T00:00:00.000Z", persistent: false });
+    const concurrent = await seedGrant("https://other.example");
+    const relay = deviceOnRelay({ [concurrent.record.ctl]: concurrent.sig });
+    const broker = await fakeBroker();
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const response = await broker.fetchImpl(input, init);
+      if (init?.method === "POST" && requestUrl(input).endsWith("/messages")) {
+        // Another tab finished its own pairing while this one waited.
+        await replaceStoredDisplayGrant({ ...concurrent.record, origin: testOrigin });
+      }
+      return response;
+    });
+    await requestEphemeralSession(baseOptions(fetchImpl, { socketFactory: relay.socketFactory }));
+    for (let tick = 0; tick < 200 && relay.sockets[0]?.closed !== true; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(relay.ff1.seen[0]).toMatchObject({ ctl: concurrent.record.ctl, cmd: "revokeController" });
+  });
+
+  it("leaves the stored grant untouched and revokes nothing when a re-pair is refused", async () => {
+    const { record: old, sig: oldSig } = await seedGrant(testOrigin, { expiresAt: "2000-01-01T00:00:00.000Z", persistent: false });
+    const relay = deviceOnRelay({ [old.ctl]: oldSig });
+    const broker = await fakeBroker({ result: { type: "mint_rejected" } });
+
+    const error = await captureError(requestEphemeralSession(baseOptions(broker.fetchImpl, { socketFactory: relay.socketFactory })));
+
+    expect((error as PlayError).code).toBe("mint_rejected");
+    expect((await readStoredDisplayGrant(testOrigin))?.ctl).toBe(old.ctl);
+    expect(relay.sockets).toHaveLength(0);
+  });
+
   it.each([
-    { name: "an invalid mint result carrying a token", options: { result: { type: "mint_succeeded", sessionId: "" } } },
+    { name: "an invalid mint result", options: { result: { type: "mint_succeeded", ctl: "" } } },
     { name: "a failed mint_request send", options: { sendStatus: 500 } },
     { name: "an expired channel", options: { expiredChannels: 1 } },
     { name: "a declined approval", options: { result: { type: "mint_rejected" } } }
@@ -758,269 +886,36 @@ describe("requestEphemeralSession", () => {
     expectNoSecrets(error);
   });
 
-  it("keeps storage keys origin scoped", () => {
-    const storage = memoryStorage();
-    storeEphemeralBrowserSession(storage, "https://nft.example", {
-      token: "token-a",
-      sessionId: "sess_a",
-      expiresAt: "2030-01-01T00:00:00.000Z"
-    });
-    storeEphemeralBrowserSession(storage, "https://other.example", {
-      token: "token-b",
-      sessionId: "sess_b",
-      expiresAt: "2030-01-01T00:00:00.000Z"
-    });
-    expect(ephemeralBrowserSessionStorageKey("https://nft.example")).not.toBe(ephemeralBrowserSessionStorageKey("https://other.example"));
-    expect(readStoredEphemeralBrowserSession(storage, "https://nft.example")?.token).toBe("token-a");
-    expect(readStoredEphemeralBrowserSession(storage, "https://other.example")?.token).toBe("token-b");
-    storage.setItem(ephemeralBrowserSessionStorageKey("https://broken.example"), "{");
-    expect(readStoredEphemeralBrowserSession(storage, "https://broken.example")).toBeUndefined();
+  it("reads back a stored grant by origin and drops an expired one", async () => {
+    const { record } = await seedGrant(testOrigin, { expiresAt: "2030-01-01T00:00:00.000Z", persistent: false });
+    expect(await readStoredEphemeralBrowserSession(testOrigin)).toEqual({ deviceId: "FF1-FIXTURE1", ctl: record.ctl, expiresAt: "2030-01-01T00:00:00.000Z", persistent: false });
+    expect(await readStoredEphemeralBrowserSession("https://other.example")).toBeUndefined();
+    await seedGrant(testOrigin, { expiresAt: "2000-01-01T00:00:00.000Z", persistent: false });
+    expect(await readStoredEphemeralBrowserSession(testOrigin)).toBeUndefined();
+    expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
   });
-
-  it.each([
-    { name: "null", expiresAt: null },
-    { name: "absent", expiresAt: undefined }
-  ])("treats a stored session with $name expiresAt as valid", ({ expiresAt }) => {
-    const storage = memoryStorage();
-    storage.setItem(ephemeralBrowserSessionStorageKey(testOrigin), JSON.stringify({
-      token: "token-kept",
-      sessionId: "sess_kept",
-      persistent: true,
-      ...(expiresAt === undefined ? {} : { expiresAt }),
-      origin: testOrigin,
-      storedAt: "2026-01-01T00:00:00.000Z"
-    }));
-    expect(readStoredEphemeralBrowserSession(storage, testOrigin)).toEqual({
-      token: "token-kept",
-      sessionId: "sess_kept",
-      persistent: true
-    });
-  });
-
-  it.each([
-    { name: "null", expiresAt: null },
-    { name: "absent", expiresAt: undefined }
-  ])("rejects and clears a stored session with $name expiresAt and no persistent marker", ({ expiresAt }) => {
-    const storage = memoryStorage();
-    const key = ephemeralBrowserSessionStorageKey(testOrigin);
-    storage.setItem(key, JSON.stringify({
-      token: "token-unmarked",
-      sessionId: "sess_unmarked",
-      ...(expiresAt === undefined ? {} : { expiresAt }),
-      origin: testOrigin,
-      storedAt: "2026-01-01T00:00:00.000Z"
-    }));
-    expect(readStoredEphemeralBrowserSession(storage, testOrigin)).toBeUndefined();
-    expect(storage.entries.has(key)).toBe(false);
-  });
-
-  it("clears a stored session it can no longer use", () => {
-    const storage = memoryStorage();
-    const key = ephemeralBrowserSessionStorageKey(testOrigin);
-    storeEphemeralBrowserSession(storage, testOrigin, {
-      token: "token-timed",
-      sessionId: "sess_timed",
-      expiresAt: "2000-01-01T00:00:00.000Z"
-    });
-    expect(readStoredEphemeralBrowserSession(storage, testOrigin)).toBeUndefined();
-    expect(storage.entries.has(key)).toBe(false);
-    storage.setItem(key, "{");
-    expect(readStoredEphemeralBrowserSession(storage, testOrigin)).toBeUndefined();
-    expect(storage.entries.has(key)).toBe(false);
-  });
-
-  it("still expires a stored timed session", () => {
-    const storage = memoryStorage();
-    storeEphemeralBrowserSession(storage, testOrigin, {
-      token: "token-timed",
-      sessionId: "sess_timed",
-      expiresAt: "2030-01-01T00:00:00.000Z"
-    });
-    expect(readStoredEphemeralBrowserSession(storage, testOrigin)?.sessionId).toBe("sess_timed");
-    storeEphemeralBrowserSession(storage, testOrigin, {
-      token: "token-timed",
-      sessionId: "sess_timed",
-      expiresAt: "2000-01-01T00:00:00.000Z"
-    });
-    expect(readStoredEphemeralBrowserSession(storage, testOrigin)).toBeUndefined();
-  });
-
 });
 
-describe("displayDp1Playlist", () => {
-  it("wraps a DP1 playlist in the FF1 display command envelope", async () => {
-    const fetchImpl = vi.fn<typeof fetch>((_input, init) => {
-      expect(init?.method).toBe("POST");
-      expect(authorizationHeader(init)).toBe("Bearer browser-session-token");
-      expect(requestBody(init)).toEqual({
-        command: "displayPlaylist",
-        request: {
-          intent: {
-            action: "now_display"
-          },
-          dp1_call: {
-            dpVersion: "1.1.0",
-            title: "Browser Playlist",
-            items: []
-          }
-        }
-      });
-      return Promise.resolve(jsonResponse({ message: { message: { ok: true } } }));
-    });
-
-    await displayDp1Playlist({
-      session: {
-        token: "browser-session-token",
-        sessionId: "sess_123",
-        expiresAt: "2030-01-01T00:00:00.000Z",
-        relayerBaseUrl: "https://relayer.example/root/"
-      },
-      playlist: {
-        dpVersion: "1.1.0",
-        title: "Browser Playlist",
-        items: []
-      },
-      fetchImpl
-    });
-
-    expect(requestUrl(fetchImpl.mock.calls[0]?.[0] ?? "")).toBe("https://relayer.example/api/cast");
-  });
-
-  it("uses the explicit relayer URL when the session does not include one", async () => {
-    const fetchImpl = vi.fn<typeof fetch>(() => Promise.resolve(jsonResponse({ message: { ok: true } })));
-
-    await displayDp1Playlist({
-      session: {
-        token: "browser-session-token",
-        sessionId: "sess_123",
-        expiresAt: "2030-01-01T00:00:00.000Z"
-      },
-      playlist: {
-        dpVersion: "1.1.0",
-        title: "Browser Playlist",
-        items: []
-      },
-      relayerBaseUrl: "https://fallback-relayer.example",
-      fetchImpl
-    });
-
-    expect(requestUrl(fetchImpl.mock.calls[0]?.[0] ?? "")).toBe("https://fallback-relayer.example/api/cast");
-  });
-
-  it("rejects a browser session rejected by the relayer without leaking the token", async () => {
-    const fetchImpl = vi.fn<typeof fetch>(() => Promise.resolve(jsonResponse({ error: "nope" }, 401)));
-    const rawToken = "super-secret-browser-session-token";
-
-    await expect(displayDp1Playlist({
-      session: {
-        token: rawToken,
-        sessionId: "sess_123",
-        expiresAt: "2030-01-01T00:00:00.000Z",
-        relayerBaseUrl: "https://relayer.example"
-      },
-      playlist: {
-        dpVersion: "1.1.0",
-        title: "Browser Playlist",
-        items: []
-      },
-      fetchImpl
-    })).rejects.not.toThrow(rawToken);
-    await expect(displayDp1Playlist({
-      session: {
-        token: rawToken,
-        sessionId: "sess_123",
-        expiresAt: "2030-01-01T00:00:00.000Z",
-        relayerBaseUrl: "https://relayer.example"
-      },
-      playlist: {
-        dpVersion: "1.1.0",
-        title: "Browser Playlist",
-        items: []
-      },
-      fetchImpl
-    })).rejects.toThrow("browser session rejected");
-  });
-
-  it("rejects an FF1-level display failure without echoing playlist content", async () => {
-    const fetchImpl = vi.fn<typeof fetch>(() => Promise.resolve(jsonResponse({
-      message: {
-        message: {
-          ok: false,
-          playlistTitle: "Private Playlist"
+describe("0.4 transport removal", () => {
+  it("leaves no relayer /api/cast or bearer-token code in the library", () => {
+    const srcDir = path.join(import.meta.dirname, "..", "src");
+    const files: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walk(full);
+        } else if (entry.name.endsWith(".ts")) {
+          files.push(full);
         }
       }
-    })));
-
-    await expect(displayDp1Playlist({
-      session: {
-        token: "browser-session-token",
-        sessionId: "sess_123",
-        expiresAt: "2030-01-01T00:00:00.000Z",
-        relayerBaseUrl: "https://relayer.example"
-      },
-      playlist: {
-        dpVersion: "1.1.0",
-        title: "Private Playlist",
-        items: []
-      },
-      fetchImpl
-    })).rejects.toThrow("FF1 rejected display request");
-    await expect(displayDp1Playlist({
-      session: {
-        token: "browser-session-token",
-        sessionId: "sess_123",
-        expiresAt: "2030-01-01T00:00:00.000Z",
-        relayerBaseUrl: "https://relayer.example"
-      },
-      playlist: {
-        dpVersion: "1.1.0",
-        title: "Private Playlist",
-        items: []
-      },
-      fetchImpl
-    })).rejects.not.toThrow("Private Playlist");
-  });
-
-  it("retries the cast once after a network failure", async () => {
-    let calls = 0;
-    const fetchImpl = vi.fn<typeof fetch>(() => {
-      calls += 1;
-      if (calls === 1) {
-        return Promise.reject(new TypeError("Failed to fetch"));
-      }
-      return Promise.resolve(jsonResponse({ message: { ok: true } }));
-    });
-    await displayDp1Playlist({
-      session: { token: "browser-session-token", sessionId: "sess_123", expiresAt: "2030-01-01T00:00:00.000Z", relayerBaseUrl: "https://relayer.example" },
-      playlist: { dpVersion: "1.1.0", title: "Browser Playlist", items: [] },
-      fetchImpl
-    });
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-  });
-
-  it("gives up after a second network failure", async () => {
-    const fetchImpl = vi.fn<typeof fetch>(() => Promise.reject(new TypeError("Failed to fetch")));
-    await expect(displayDp1Playlist({
-      session: { token: "browser-session-token", sessionId: "sess_123", expiresAt: "2030-01-01T00:00:00.000Z", relayerBaseUrl: "https://relayer.example" },
-      playlist: { dpVersion: "1.1.0", title: "Browser Playlist", items: [] },
-      fetchImpl
-    })).rejects.toThrow(TypeError);
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-  });
-
-  it("requires a relayer URL", async () => {
-    await expect(displayDp1Playlist({
-      session: {
-        token: "browser-session-token",
-        sessionId: "sess_123",
-        expiresAt: "2030-01-01T00:00:00.000Z"
-      },
-      playlist: {
-        dpVersion: "1.1.0",
-        title: "Browser Playlist",
-        items: []
-      },
-      relayerBaseUrl: " "
-    })).rejects.toThrow("relayer base URL is required");
+    };
+    walk(srcDir);
+    for (const file of files) {
+      const text = readFileSync(file, "utf8");
+      expect(text, file).not.toMatch(/\/api\/cast/);
+      expect(text, file).not.toMatch(/Bearer \$\{options\.session/);
+      expect(text, file).not.toMatch(/relayerBaseUrl/);
+    }
   });
 });

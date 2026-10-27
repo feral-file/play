@@ -38,10 +38,17 @@ encrypted request/response messages while the website and the token minter
 pair. The broker does not interpret mint requests, tokens, or DP1 playlist
 content.
 
-The browser session is scoped to browser cast/display access. DP1 playlist
-content must stay out of `ff-controller`, the Go token minter, and the Mint
-Pairing Broker. The browser casts a DP1 feed URL to `ff-relayer`, and the FF1
-display path fetches the feed directly.
+What the FF1 issues the browser depends on the requester library. From
+`@feralfile/play` 0.5.0 the request carries display-grant keys and the FF1
+answers with a **display grant** (FF1 control protocol v1 §5.7): a display-only
+controller record bound to keys the browser generated, pinning the FF1's
+profile and naming its relay v2 endpoint. The browser then casts by sealing
+`displayPlaylist` under those keys and sending the envelope over relay v2,
+connecting per cast. Requests without those keys (0.4) get a browser session
+token for the legacy `ff-relayer` `/api/cast` path, until that API is
+retired. DP1 playlist content must stay out of `ff-controller`, the Go token
+minter, and the Mint Pairing Broker; it travels only inside the encrypted cast
+envelope, and the FF1 display path fetches the feed directly.
 
 ## Sequence
 
@@ -49,7 +56,7 @@ display path fetches the feed directly.
 sequenceDiagram
     autonumber
     participant NFTSite as NFT display website + requester library
-    participant Storage as website localStorage
+    participant Storage as website IndexedDB
     participant Broker as Mint Pairing Broker (/server)
     participant App as Feral File app (ff-controller)
     participant Relayer as ff-relayer
@@ -57,9 +64,10 @@ sequenceDiagram
     participant GoMinter as Go broker/E2EE minter library
 
     NFTSite->>NFTSite: User selects works and builds/hosts DP1 feed URL
-    NFTSite->>Storage: Check for origin-scoped ephemeral browser session
-    alt no stored or valid session
-        NFTSite->>Broker: POST /v1/channels {creatorRole: browser, browserPublicKeyJwk, browserInfo} + Origin header
+    NFTSite->>Storage: Check for an origin-scoped display grant
+    alt no stored or valid grant
+        NFTSite->>NFTSite: Generate fresh non-extractable grant keys (sig, enc)
+        NFTSite->>Broker: POST /v1/channels {creatorRole: browser, browserPublicKeyJwk, browserInfo, mintRequest{displayGrant keys}} + Origin header
         Broker->>Broker: Attest origin from the Origin header
         Broker-->>NFTSite: channelId, browserToken, pairingToken, shortCode, expiresAt
         NFTSite->>NFTSite: Show app link (button on phone, QR on desktop) and short code
@@ -80,7 +88,7 @@ sequenceDiagram
             NFTSite->>Broker: Poll messages with browserToken
             Broker-->>NFTSite: status waiting/paired, peer {role: minter, publicKeyJwk}
         end
-        NFTSite->>Broker: E2EE mint_request (origin, browserInfo, browser key)
+        NFTSite->>Broker: E2EE mint_request (origin, browserInfo, browser key, displayGrant keys)
         loop until request arrives or channel expires
             GoMinter->>Broker: Poll with minterToken
             Broker-->>GoMinter: Encrypted mint_request
@@ -96,24 +104,23 @@ sequenceDiagram
         else user approves
             App-->>Relayer: Approve (keep paired or timed)
             Relayer-->>Feral: Return approval
-            Feral->>Relayer: POST /api/ephemeral-sessions?topicID=...
-            Relayer-->>Feral: Return session metadata and one-time token
+            Feral->>Feral: Issue display grant to the browser's keys (display_grants.json)
             Feral->>GoMinter: Send success result
-            GoMinter->>Broker: E2EE mint_succeeded with the session
+            GoMinter->>Broker: E2EE mint_succeeded with the displayGrant (ctl, profile, relayV2Endpoint, expiresAt?)
         end
         loop until result or expired
             NFTSite->>Broker: Poll for encrypted result
-            Broker-->>NFTSite: Encrypted rejection or session
+            Broker-->>NFTSite: Encrypted rejection or grant
         end
-        NFTSite->>NFTSite: Validate request binding and token metadata
-        NFTSite->>Storage: Store token under current website origin
+        NFTSite->>NFTSite: Validate request binding, ctl = thumb(sig), profile and endpoint
+        NFTSite->>Storage: Store grant + keys + counter under current website origin
     end
-    NFTSite->>Relayer: POST /api/cast with bearer browser session and DP1 feed URL
-    Relayer->>Feral: Forward displayPlaylist command for the device topic
-    Feral->>NFTSite: Fetch DP1 feed URL directly
-    Feral->>Feral: Resolve DP1 and play through Chromium/frontend
-    Feral-->>Relayer: Report playback success/failure
-    Relayer-->>NFTSite: Return cast result
+    NFTSite->>NFTSite: Seal displayPlaylist (DP1 document) under the grant keys
+    NFTSite->>Relayer: wss /v2/channels/{deviceId}/connections: fan out the sealed envelope, ACK frames
+    Relayer->>Feral: Forward the envelope to the FF1 peer
+    Feral->>Feral: Open, admit the display grant, resolve DP1 and play through Chromium/frontend
+    Feral-->>Relayer: Sealed reply (ok / code)
+    Relayer-->>NFTSite: Reply verified against the pinned profile; socket closed
 ```
 
 ## Legacy device-initiated pairing
@@ -133,15 +140,16 @@ upgrades.
 ### NFT Display Website
 
 The NFT display website lets the user select works, builds or hosts the DP1 feed
-URL, and runs the token requester browser library. It first checks
-`localStorage` for an existing ephemeral browser session scoped to the current
-website origin. If one is missing or invalid, it creates a pairing channel on
-the Mint Pairing Broker, shows the visitor the app link and short code, waits
-for the Art Computer to join, establishes an end-to-end encrypted channel with
-the token minter, submits a mint request containing origin and browser/client metadata, receives the
-encrypted token result, stores the token in origin-scoped storage, and attaches
-it only to the intended `ff-relayer` cast/display request. It does not receive
-API keys or topic-management authority.
+URL, and runs the token requester browser library. It first checks IndexedDB
+for an existing display grant scoped to the current website origin. If one is
+missing or expired, it generates fresh non-extractable keys, creates a pairing
+channel on the Mint Pairing Broker, shows the visitor the app link and short
+code, waits for the Art Computer to join, establishes an end-to-end encrypted
+channel with the token minter, submits a mint request containing origin,
+browser/client metadata and the grant's public keys, receives the encrypted
+grant, stores it with its keys and request counter in origin-scoped IndexedDB,
+and uses those keys only to seal `displayPlaylist` envelopes for relay v2. It
+does not receive API keys or topic-management authority.
 
 ### Ephemeral Token Minter
 
@@ -158,9 +166,11 @@ frontend display.
 The Go library does not contact `ff-controller` or `ff-relayer` and does not
 own session creation policy. `feral-controld` receives the decrypted
 `MintRequest`, asks the user for approval through its controller/relayer path,
-calls `ff-relayer` to create an ephemeral browser session on approval, then
-passes either `MintResult` or `MintRejection` into the Go library for encrypted
-delivery to the requester.
+then on approval either issues a display grant to the request's
+`DisplayGrant` keys (a 0.5 request) or calls `ff-relayer` to create an
+ephemeral browser session (a 0.4 request), and passes the `DisplayGrantResult`,
+`MintResult` or `MintRejection` into the Go library for encrypted delivery to
+the requester.
 
 ### ff-controller
 
@@ -175,7 +185,12 @@ receive, copy, or proxy raw browser session tokens or DP1 playlist content.
 
 ### ff-relayer
 
-`ff-relayer` owns the ephemeral session lifecycle used for display requests:
+For a display grant, `ff-relayer` is only the relay v2 transport: the browser
+opens the FF1's public device channel per cast, the relay forwards the sealed
+envelope and the sealed reply, and stores no session, token or permission for
+the site; revocation is an FF1 decision the relay never observes.
+
+For 0.4 sessions, `ff-relayer` owns the ephemeral session lifecycle used for display requests:
 create, list, revoke, expire, and authorize browser casts. Per
 `feral-file/ff-relayer#13`, `feral-controld` creates sessions with
 `POST /api/ephemeral-sessions?topicID=...`, management clients can list and
@@ -214,11 +229,11 @@ DP1 content, and plays it through Chromium/frontend. The device path, not
 
 ## Security Notes
 
-- Ephemeral browser session tokens are bearer credentials and must not be logged.
-- Tokens stored by the browser library are scoped by browser origin through `localStorage`.
+- A display grant's private keys are non-extractable WebCrypto keys stored by the browser library in origin-scoped IndexedDB; the 0.4 session tokens they replace were bearer credentials and must not be logged.
+- Every cast is a fresh signed, encrypted envelope with a per-grant counter; the browser never resends sealed bytes, treats a `replay` as an unknown outcome, and accepts only replies that verify against the FF1 profile pinned at pairing. An unverified public error from the channel never deletes the grant.
 - Mint request and token response payloads are opaque to the Mint Pairing Broker and are retained only for the short pairing window.
 - `feral-controld` obtains raw token material from `ff-relayer` and passes it to the Go minter library only for E2EE requester delivery.
-- Revocation and expiry are enforced by `ff-relayer`.
+- Revocation and expiry of a display grant are enforced by the FF1 (owner app, CLI or the site's own self-revoke); for 0.4 sessions by `ff-relayer`.
 - The broker records the creating site's origin from the HTTP `Origin` header, which a page running in a browser cannot forge, and the device refuses a mint request whose origin differs from it. The header binds pages, not programs: a client outside a browser can send any `Origin`, so the attestation stops one web page from impersonating another, not a server-side creator.
 - The pairing token and short code are single-use and die with the channel (idle TTL, at most 300 s). The app link carries the pairing token but no broker URL; the device always joins on its configured broker.
 - `ff-controller` approves or rejects requests but does not receive raw tokens or DP1 playlist content.

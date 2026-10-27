@@ -1,19 +1,19 @@
 import qrcode from "qrcode-generator";
+import { displayDp1Playlist, pairingReplacedMessage, tooManyCastsMessage, type DisplayDp1PlaylistOptions, type Dp1Playlist } from "./cast.js";
 import {
-  displayDp1Playlist,
+  legacySessionStorageKey,
   readStoredEphemeralBrowserSession,
   requestEphemeralSession,
   validateAppLinkBaseUrl,
   validateRequestedExpiresInSeconds,
   type BrowserInfo,
-  type DisplayDp1PlaylistOptions,
-  type Dp1Playlist,
   type EphemeralBrowserSession,
-  type RequestEphemeralSessionOptions,
-  type TokenStorage,
-  type TokenStorageOptions
+  type GrantStorageOptions,
+  type RequestEphemeralSessionOptions
 } from "./client.js";
+import type { SocketFactory } from "./control/relay-client.js";
 import { PlayError } from "./errors.js";
+import { deleteStoredDisplayGrant, hasIndexedDb } from "./grantStore.js";
 import type { PairingMaterial } from "./pairingPayload.js";
 
 export type PairingDialogCopy = {
@@ -91,27 +91,36 @@ export type PlayOnArtComputerButtonOptions = {
   container: HTMLElement | string;
   playlist: ValueProvider<Dp1Playlist>;
   brokerBaseUrl: ValueProvider<string>;
-  relayerBaseUrl?: ValueProvider<string | undefined>;
   /**
    * Base of the link that brings the visitor's Art Computer to the pairing
    * channel. Defaults to `https://link.feralfile.com/pair`.
    */
   appLinkBaseUrl?: string;
   browserInfo?: BrowserInfo;
-  storage?: TokenStorageOptions;
+  storage?: GrantStorageOptions;
   pollIntervalMs?: number;
   maxWaitMs?: number;
   /**
-   * Session lifetime this site asks for, in whole seconds, from 1 to
+   * Grant lifetime this site asks for, in whole seconds, from 1 to
    * 31536000 (one year). Leave unset to take the device default. The device
    * owner decides: if they keep this site paired until removed, the requested
-   * lifetime is ignored and the session has no expiry.
+   * lifetime is ignored and the grant has no expiry.
    */
   requestedExpiresInSeconds?: number;
   fetchImpl?: typeof fetch;
+  /** Opens the relay WebSocket; defaults to the browser's `WebSocket`. */
+  socketFactory?: SocketFactory;
+  /** Deadline for one cast's relay round trip; see `DisplayDp1PlaylistOptions.timeoutMs`. */
+  castTimeoutMs?: number;
   document?: Document;
   buttonLabel?: string;
   busyLabel?: string;
+  /**
+   * Label after the FF1 no longer recognizes this site's pairing (a factory
+   * reset, or the site was removed on the device). The next click pairs
+   * again; nothing is cleared until the visitor asks.
+   */
+  pairAgainLabel?: string;
   className?: string;
   statusClassName?: string;
   dialog?: Omit<PairingDialogOptions, "onCancel">;
@@ -130,11 +139,12 @@ export type PlayOnArtComputerButtonHandle = {
 type OptionalBrowserGlobals = {
   document?: Document;
   location?: { origin?: unknown };
-  localStorage?: Storage;
+  localStorage?: Pick<Storage, "removeItem">;
 };
 
 const dialogStyleElementId = "ff-art-computer-pairing-ui-style";
 const defaultButtonLabel = "Play on Art Computer";
+const defaultPairAgainLabel = "Pair again?";
 const svgNamespace = "http://www.w3.org/2000/svg";
 /** Expired channels the wrapped flow replaces before giving up. */
 const wrappedChannelRegenerations = 2;
@@ -166,7 +176,21 @@ export function pairingErrorMessage(error: unknown): string {
       case "approval_timeout":
         return "Timed out waiting for your Art Computer. Press play to try again.";
       case "session_rejected":
-        return "The stored browser session was rejected. Pair again.";
+        return "The pairing with your Art Computer has ended. Pair again.";
+      case "device_unsupported":
+        return "This Art Computer needs an FF OS update before this site can play on it.";
+      case "device_unrecognized":
+        return "Your Art Computer no longer recognizes this site. Pair again?";
+      case "storage_unavailable":
+        return "This browser cannot store the pairing. Allow site data and try again.";
+      case "too_many_sites":
+        return "Your Art Computer has as many paired sites as it allows. Remove one in the Feral File app first.";
+      case "display_failed":
+        return error.message === tooManyCastsMessage || error.message === pairingReplacedMessage
+          ? error.message
+          : "Could not reach your Art Computer. Check that it is online and try again.";
+      case "display_rejected":
+        return "Your Art Computer refused the playlist.";
       default:
         break;
     }
@@ -174,12 +198,24 @@ export function pairingErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "request failed";
 }
 
-export function clearStoredEphemeralBrowserSession(storage: TokenStorage, origin: string): void {
-  storage.removeItem(`ff:ephemeral-browser-session:${origin}`);
+/**
+ * Forgets this origin's display grant and keys, without telling the FF1
+ * (`unpairArtComputer` does both). Synchronous: the delete is issued and the
+ * next read waits behind it. Also drops a 0.4 session record if one is left.
+ */
+export function clearStoredEphemeralBrowserSession(origin: string): void {
+  try {
+    (globalThis as unknown as OptionalBrowserGlobals).localStorage?.removeItem(legacySessionStorageKey(origin));
+  } catch {
+    // Storage access can throw in a sandboxed frame; there is nothing to remove then.
+  }
+  if (hasIndexedDb()) {
+    void deleteStoredDisplayGrant(origin).catch(() => undefined);
+  }
 }
 
-export function hasStoredEphemeralBrowserSession(storage: TokenStorage, origin: string): boolean {
-  return readStoredEphemeralBrowserSession(storage, origin) !== undefined;
+export async function hasStoredEphemeralBrowserSession(origin: string): Promise<boolean> {
+  return (await readStoredEphemeralBrowserSession(origin)) !== undefined;
 }
 
 /**
@@ -362,9 +398,8 @@ export async function requestEphemeralSessionWithPairingUi(
 ): Promise<EphemeralBrowserSession> {
   validateRequestedExpiresInSeconds(options.requestedExpiresInSeconds);
   validateAppLinkBaseUrl(options.appLinkBaseUrl);
-  const storage = resolveUiStorage(options.storage);
   const origin = currentOriginForUi();
-  const existingSession = storage === undefined ? undefined : readStoredEphemeralBrowserSession(storage, origin);
+  const existingSession = options.storage === false ? undefined : await readStoredEphemeralBrowserSession(origin);
   if (existingSession !== undefined) {
     return existingSession;
   }
@@ -422,8 +457,11 @@ export function mountPlayOnArtComputerButton(options: PlayOnArtComputerButtonOpt
   container.append(wrapper);
 
   const clickController = new AbortController();
+  // Set after `device_unrecognized`: the stored grant is kept until the
+  // visitor taps again, since any channel peer can forge that answer.
+  const state = { pairAgain: false };
   button.addEventListener("click", () => {
-    void playFromButton(options, ownerDocument, button, status);
+    void playFromButton(options, ownerDocument, button, status, state);
   }, { signal: clickController.signal });
 
   return {
@@ -440,17 +478,22 @@ async function playFromButton(
   options: PlayOnArtComputerButtonOptions,
   ownerDocument: Document,
   button: HTMLButtonElement,
-  status: HTMLElement
+  status: HTMLElement,
+  state: { pairAgain: boolean }
 ): Promise<void> {
   const idleLabel = options.buttonLabel ?? defaultButtonLabel;
   button.disabled = true;
   button.textContent = options.busyLabel ?? "Preparing...";
   try {
-    setStatus(options, status, "Checking browser session.");
+    setStatus(options, status, "Checking pairing.");
     const brokerBaseUrl = await resolveProvider(options.brokerBaseUrl);
-    const storage = resolveUiStorage(options.storage);
     const origin = currentOriginForUi();
-    if (storage !== undefined && !hasStoredEphemeralBrowserSession(storage, origin)) {
+    if (state.pairAgain) {
+      // Only the visitor's tap clears a grant the FF1 said it did not know.
+      state.pairAgain = false;
+      clearStoredEphemeralBrowserSession(origin);
+    }
+    if (options.storage === false || !(await hasStoredEphemeralBrowserSession(origin))) {
       setStatus(options, status, "Waiting for your Art Computer.");
     }
     const session = await requestEphemeralSessionWithPairingUi({
@@ -462,6 +505,7 @@ async function playFromButton(
       ...(options.maxWaitMs === undefined ? {} : { maxWaitMs: options.maxWaitMs }),
       ...(options.requestedExpiresInSeconds === undefined ? {} : { requestedExpiresInSeconds: options.requestedExpiresInSeconds }),
       ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
+      ...(options.socketFactory === undefined ? {} : { socketFactory: options.socketFactory }),
       ...(options.createDialog === undefined ? {} : { createDialog: options.createDialog }),
       dialog: {
         document: ownerDocument,
@@ -469,35 +513,34 @@ async function playFromButton(
       }
     });
     setStatus(options, status, "Sending playlist to Art Computer.");
-    await displayDp1Playlist(displayOptions(options, session, await resolveProvider(options.playlist), await resolveOptionalProvider(options.relayerBaseUrl)));
+    await displayDp1Playlist(displayOptions(options, session, await resolveProvider(options.playlist)));
     setStatus(options, status, "Playlist sent to Art Computer.");
     options.onSuccess?.();
   } catch (error) {
-    if (error instanceof PlayError && error.code === "session_rejected") {
-      const storage = resolveUiStorage(options.storage);
-      if (storage !== undefined) {
-        clearStoredEphemeralBrowserSession(storage, currentOriginForUi());
-      }
+    // session_rejected needs no clearing here: the library already deleted
+    // the rejected grant by its ctl, and an unconditional clear would remove
+    // a newer grant another tab stored meanwhile.
+    if (error instanceof PlayError && error.code === "device_unrecognized") {
+      state.pairAgain = true;
     }
     setStatus(options, status, pairingErrorMessage(error));
     options.onError?.(error);
   } finally {
     button.disabled = false;
-    button.textContent = idleLabel;
+    button.textContent = state.pairAgain ? options.pairAgainLabel ?? defaultPairAgainLabel : idleLabel;
   }
 }
 
 function displayOptions(
   buttonOptions: PlayOnArtComputerButtonOptions,
   session: EphemeralBrowserSession,
-  playlist: Dp1Playlist,
-  relayerBaseUrl: string | undefined
+  playlist: Dp1Playlist
 ): DisplayDp1PlaylistOptions {
   return {
     session,
     playlist,
-    ...(relayerBaseUrl === undefined ? {} : { relayerBaseUrl }),
-    ...(buttonOptions.fetchImpl === undefined ? {} : { fetchImpl: buttonOptions.fetchImpl })
+    ...(buttonOptions.socketFactory === undefined ? {} : { socketFactory: buttonOptions.socketFactory }),
+    ...(buttonOptions.castTimeoutMs === undefined ? {} : { timeoutMs: buttonOptions.castTimeoutMs })
   };
 }
 
@@ -517,12 +560,6 @@ async function resolveProvider<T>(provider: ValueProvider<T>): Promise<T> {
   return provider;
 }
 
-async function resolveOptionalProvider<T>(provider: ValueProvider<T | undefined> | undefined): Promise<T | undefined> {
-  if (provider === undefined) {
-    return undefined;
-  }
-  return resolveProvider(provider);
-}
 
 function resolveContainer(ownerDocument: Document, container: HTMLElement | string): HTMLElement {
   if (typeof container !== "string") {
@@ -549,21 +586,6 @@ function currentOriginForUi(): string {
     return origin;
   }
   throw new Error("origin is required");
-}
-
-function resolveUiStorage(options: TokenStorageOptions | undefined): TokenStorage | undefined {
-  if (options === false) {
-    return undefined;
-  }
-  if (typeof options === "object") {
-    if (options.enabled === false) {
-      return undefined;
-    }
-    if (options.storage !== undefined) {
-      return options.storage;
-    }
-  }
-  return (globalThis as unknown as OptionalBrowserGlobals).localStorage;
 }
 
 function className(base: string, extra: string | undefined): string {

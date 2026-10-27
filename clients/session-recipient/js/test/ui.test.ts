@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import qrcode from "qrcode-generator";
+import { pairingReplacedMessage, tooManyCastsMessage } from "../src/cast.js";
 import { PlayError } from "../src/errors.js";
 import {
   clearStoredEphemeralBrowserSession,
@@ -11,18 +12,21 @@ import {
   pairingErrorMessage,
   renderQrSvg,
   requestEphemeralSessionWithPairingUi,
-  storeEphemeralBrowserSession,
   type PairingDialog,
   type PairingDialogOptions,
   type PairingMaterial
 } from "../src/index.js";
-import { brokerBaseUrl, captureError, expectNoSecrets, fakeBroker, jsonResponse, memoryStorage, requestUrl } from "./fakeBroker.js";
+import { readStoredDisplayGrant, replaceStoredDisplayGrant } from "../src/grantStore.js";
+import { brokerBaseUrl, captureError, expectNoSecrets, fakeBroker } from "./fakeBroker.js";
+import { fakeRelay } from "./fakeRelay.js";
+import { deviceOnRelay, resetIndexedDb, seedGrant } from "./grants.js";
 
 const testOrigin = "https://nft.example";
 let previousLocationDescriptor: PropertyDescriptor | undefined;
 let previousHTMLElementDescriptor: PropertyDescriptor | undefined;
 
 beforeEach(() => {
+  resetIndexedDb();
   previousLocationDescriptor = Object.getOwnPropertyDescriptor(globalThis, "location");
   previousHTMLElementDescriptor = Object.getOwnPropertyDescriptor(globalThis, "HTMLElement");
   Object.defineProperty(globalThis, "location", {
@@ -278,6 +282,14 @@ describe("pairing dialog copy", () => {
     expect(pairingErrorMessage(new PlayError("mint request rejected", "mint_rejected"))).toBe("The browser session was not approved in Feral File.");
     expect(pairingErrorMessage(new PlayError("poll timed out", "approval_timeout"))).toContain("Timed out");
     expect(pairingErrorMessage(new PlayError("browser session rejected", "session_rejected"))).toContain("Pair again");
+    expect(pairingErrorMessage(new PlayError("needs update", "device_unsupported"))).toContain("FF OS update");
+    expect(pairingErrorMessage(new PlayError("unrecognized", "device_unrecognized"))).toContain("Pair again?");
+    expect(pairingErrorMessage(new PlayError("no idb", "storage_unavailable"))).toContain("store the pairing");
+    expect(pairingErrorMessage(new PlayError("cap", "too_many_sites"))).toContain("Remove one");
+    expect(pairingErrorMessage(new PlayError("offline", "display_failed"))).toContain("Could not reach");
+    expect(pairingErrorMessage(new PlayError(tooManyCastsMessage, "display_failed"))).toBe(tooManyCastsMessage);
+    expect(pairingErrorMessage(new PlayError(pairingReplacedMessage, "display_failed"))).toBe(pairingReplacedMessage);
+    expect(pairingErrorMessage(new PlayError("refused", "display_rejected"))).toContain("refused");
     expect(pairingErrorMessage(new Error("channel create failed: 429"))).toBe("channel create failed: 429");
   });
 });
@@ -453,12 +465,11 @@ describe("requestEphemeralSessionWithPairingUi", () => {
     const dialog = recordingDialog();
     const session = await requestEphemeralSessionWithPairingUi({
       brokerBaseUrl,
-      storage: false,
       pollIntervalMs: 1,
       fetchImpl: broker.fetchImpl,
       createDialog: dialog.createDialog
     });
-    expect(session.sessionId).toBe("sess_123");
+    expect(session.deviceId).toBe("FF1-FIXTURE1");
     expect(dialog.materials[0]?.appLink).toBe("https://link.feralfile.com/pair?channel=ch_1&token=pt_secret_1");
     expect(dialog.events).toEqual([
       "show 123451",
@@ -474,7 +485,6 @@ describe("requestEphemeralSessionWithPairingUi", () => {
     const dialog = recordingDialog();
     await requestEphemeralSessionWithPairingUi({
       brokerBaseUrl,
-      storage: false,
       pollIntervalMs: 1,
       fetchImpl: broker.fetchImpl,
       createDialog: dialog.createDialog
@@ -487,7 +497,6 @@ describe("requestEphemeralSessionWithPairingUi", () => {
     const dialog = recordingDialog();
     const error = await captureError(requestEphemeralSessionWithPairingUi({
       brokerBaseUrl,
-      storage: false,
       pollIntervalMs: 1,
       fetchImpl: broker.fetchImpl,
       createDialog: dialog.createDialog
@@ -503,7 +512,6 @@ describe("requestEphemeralSessionWithPairingUi", () => {
     const dialog = recordingDialog();
     const pending = requestEphemeralSessionWithPairingUi({
       brokerBaseUrl,
-      storage: false,
       pollIntervalMs: 5,
       fetchImpl: broker.fetchImpl,
       createDialog: dialog.createDialog
@@ -522,7 +530,6 @@ describe("requestEphemeralSessionWithPairingUi", () => {
     await expect(requestEphemeralSessionWithPairingUi({
       brokerBaseUrl,
       appLinkBaseUrl: "javascript:alert(1)",
-      storage: false,
       createDialog
     })).rejects.toThrow(/appLinkBaseUrl/);
     expect(createDialog).not.toHaveBeenCalled();
@@ -530,101 +537,66 @@ describe("requestEphemeralSessionWithPairingUi", () => {
 });
 
 describe("session UI helpers", () => {
-  it("checks and clears origin-scoped stored sessions", () => {
-    const storage = memoryStorage();
-    expect(hasStoredEphemeralBrowserSession(storage, testOrigin)).toBe(false);
-    storeEphemeralBrowserSession(storage, testOrigin, {
-      token: "browser-session-token",
-      sessionId: "sess_123",
-      expiresAt: "2030-01-01T00:00:00.000Z"
-    });
-    expect(hasStoredEphemeralBrowserSession(storage, testOrigin)).toBe(true);
-    clearStoredEphemeralBrowserSession(storage, testOrigin);
-    expect(hasStoredEphemeralBrowserSession(storage, testOrigin)).toBe(false);
+  it("checks and clears origin-scoped stored grants", async () => {
+    expect(await hasStoredEphemeralBrowserSession(testOrigin)).toBe(false);
+    await seedGrant(testOrigin);
+    expect(await hasStoredEphemeralBrowserSession(testOrigin)).toBe(true);
+    expect(await hasStoredEphemeralBrowserSession("https://other.example")).toBe(false);
+    clearStoredEphemeralBrowserSession(testOrigin);
+    // Synchronous: the delete is queued ahead of the next read.
+    expect(await hasStoredEphemeralBrowserSession(testOrigin)).toBe(false);
   });
 
-  it("does not show the pairing dialog when a valid local session exists", async () => {
-    const storage = memoryStorage();
-    storeEphemeralBrowserSession(storage, testOrigin, {
-      token: "browser-session-token",
-      sessionId: "sess_123",
-      expiresAt: "2030-01-01T00:00:00.000Z"
-    });
+  it("does not show the pairing dialog when a valid local grant exists", async () => {
+    const { record } = await seedGrant(testOrigin);
     const createDialog = vi.fn(() => {
       throw new Error("dialog should not be created");
     });
 
     await expect(requestEphemeralSessionWithPairingUi({
       brokerBaseUrl: "https://pairing.example",
-      storage: { storage },
       createDialog
-    })).resolves.toEqual({
-      token: "browser-session-token",
-      sessionId: "sess_123",
-      expiresAt: "2030-01-01T00:00:00.000Z"
-    });
+    })).resolves.toEqual({ deviceId: "FF1-FIXTURE1", ctl: record.ctl, persistent: true });
     expect(createDialog).not.toHaveBeenCalled();
   });
 
-  it("rejects an invalid requested lifetime even when a session is cached", async () => {
-    const storage = memoryStorage();
-    storeEphemeralBrowserSession(storage, testOrigin, {
-      token: "browser-session-token",
-      sessionId: "sess_123",
-      expiresAt: "2030-01-01T00:00:00.000Z"
-    });
-
+  it("rejects an invalid requested lifetime even when a grant is cached", async () => {
+    await seedGrant(testOrigin);
     await expect(requestEphemeralSessionWithPairingUi({
       brokerBaseUrl: "https://pairing.example",
-      storage: { storage },
       requestedExpiresInSeconds: 1e21
     })).rejects.toThrow("requestedExpiresInSeconds must be a whole number of seconds from 1 to 31536000");
   });
 
-  it("reuses a cached session with a valid requested lifetime", async () => {
-    const storage = memoryStorage();
-    storeEphemeralBrowserSession(storage, testOrigin, {
-      token: "browser-session-token",
-      sessionId: "sess_123",
-      expiresAt: "2030-01-01T00:00:00.000Z"
-    });
-
+  it("reuses a cached grant with a valid requested lifetime", async () => {
+    const { record } = await seedGrant(testOrigin, { expiresAt: "2030-01-01T00:00:00.000Z", persistent: false });
     await expect(requestEphemeralSessionWithPairingUi({
       brokerBaseUrl: "https://pairing.example",
-      storage: { storage },
       requestedExpiresInSeconds: 3600
-    })).resolves.toEqual({
-      token: "browser-session-token",
-      sessionId: "sess_123",
-      expiresAt: "2030-01-01T00:00:00.000Z"
-    });
+    })).resolves.toEqual({ deviceId: "FF1-FIXTURE1", ctl: record.ctl, expiresAt: "2030-01-01T00:00:00.000Z", persistent: false });
   });
 });
 
 describe("mountPlayOnArtComputerButton", () => {
-  it("casts with a stored local session without creating the pairing dialog", async () => {
-    const storage = memoryStorage();
-    storeEphemeralBrowserSession(storage, testOrigin, {
-      token: "browser-session-token",
-      sessionId: "sess_123",
-      expiresAt: "2030-01-01T00:00:00.000Z",
-      relayerBaseUrl: "https://relayer.example"
-    });
+  const playlist = { dpVersion: "1.1.0", title: "Stored Grant Playlist", items: [] };
+
+  it("casts over relay v2 with a stored grant without creating the pairing dialog", async () => {
+    const { record, sig } = await seedGrant(testOrigin);
+    const relay = deviceOnRelay({ [record.ctl]: sig });
     const { document } = fakeDocumentWithContainer();
     const createDialog = vi.fn(() => {
       throw new Error("dialog should not be created");
     });
-    const fetchImpl = vi.fn<typeof fetch>((input) => {
-      expect(requestUrl(input)).toBe("https://relayer.example/api/cast");
-      return Promise.resolve(jsonResponse({ message: { ok: true } }));
+    const fetchImpl = vi.fn<typeof fetch>(() => {
+      throw new Error("no HTTP request belongs in a cast");
     });
     let resolved = false;
     const handle = mountPlayOnArtComputerButton({
       container: "#play-button-container",
-      playlist: { dpVersion: "1.1.0", title: "Stored Session Playlist", items: [] },
+      playlist,
       brokerBaseUrl: "https://pairing.example",
-      storage: { storage },
       fetchImpl,
+      socketFactory: relay.socketFactory,
       document,
       createDialog,
       onSuccess: () => {
@@ -633,105 +605,63 @@ describe("mountPlayOnArtComputerButton", () => {
     });
 
     handle.element.click();
-    await nextTick();
+    await waitFor(() => resolved);
 
     expect(resolved).toBe(true);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).not.toHaveBeenCalled();
     expect(createDialog).not.toHaveBeenCalled();
+    expect(relay.ff1.seen[0]).toMatchObject({ ctl: record.ctl, cmd: "displayPlaylist" });
+    expect(relay.sockets[0]?.closed).toBe(true);
   });
 
-  it("refuses to mount with an invalid requested lifetime even when a session is cached", () => {
-    const storage = memoryStorage();
-    storeEphemeralBrowserSession(storage, testOrigin, {
-      token: "browser-session-token",
-      sessionId: "sess_123",
-      expiresAt: "2030-01-01T00:00:00.000Z",
-      relayerBaseUrl: "https://relayer.example"
-    });
+  it("refuses to mount with an invalid requested lifetime even when a grant is cached", async () => {
+    await seedGrant(testOrigin);
     const { document } = fakeDocumentWithContainer();
-    const fetchImpl = vi.fn<typeof fetch>(() => {
-      throw new Error("cast should not be attempted");
-    });
+    const relay = fakeRelay({ peers: [] });
 
     expect(() => mountPlayOnArtComputerButton({
       container: "#play-button-container",
-      playlist: { dpVersion: "1.1.0", title: "Stored Session Playlist", items: [] },
+      playlist,
       brokerBaseUrl: "https://pairing.example",
-      storage: { storage },
       requestedExpiresInSeconds: 1e21,
-      fetchImpl,
+      socketFactory: relay.socketFactory,
       document
     })).toThrow("requestedExpiresInSeconds must be a whole number of seconds from 1 to 31536000");
-    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(relay.sockets).toHaveLength(0);
   });
-
-  it("casts with a cached session and a valid requested lifetime", async () => {
-    const storage = memoryStorage();
-    storeEphemeralBrowserSession(storage, testOrigin, {
-      token: "browser-session-token",
-      sessionId: "sess_123",
-      expiresAt: "2030-01-01T00:00:00.000Z",
-      relayerBaseUrl: "https://relayer.example"
-    });
-    const { document } = fakeDocumentWithContainer();
-    const fetchImpl = vi.fn<typeof fetch>((input) => {
-      expect(requestUrl(input)).toBe("https://relayer.example/api/cast");
-      return Promise.resolve(jsonResponse({ message: { ok: true } }));
-    });
-    let resolved = false;
-    const handle = mountPlayOnArtComputerButton({
-      container: "#play-button-container",
-      playlist: { dpVersion: "1.1.0", title: "Stored Session Playlist", items: [] },
-      brokerBaseUrl: "https://pairing.example",
-      storage: { storage },
-      requestedExpiresInSeconds: 3600,
-      fetchImpl,
-      document,
-      onSuccess: () => {
-        resolved = true;
-      }
-    });
-
-    handle.element.click();
-    await nextTick();
-
-    expect(resolved).toBe(true);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-  });
-
 
   it("refuses to mount with an invalid appLinkBaseUrl", () => {
     const { document } = fakeDocumentWithContainer();
     expect(() => mountPlayOnArtComputerButton({
       container: "#play-button-container",
-      playlist: { dpVersion: "1.1.0", title: "Playlist", items: [] },
+      playlist,
       brokerBaseUrl,
       appLinkBaseUrl: "javascript:alert(1)",
       document
     })).toThrow(/appLinkBaseUrl/);
   });
 
-  it("pairs through the dialog on the mounted document, then casts with the new session", async () => {
-    const storage = memoryStorage();
+  it("pairs through the dialog on the mounted document, then casts with the new grant", async () => {
     const { document, fake } = fakeDocumentWithContainer(phoneView());
     const broker = await fakeBroker();
-    const fetchImpl = vi.fn<typeof fetch>((input, init) => {
-      if (requestUrl(input) === "https://relayer.example/api/cast") {
-        return Promise.resolve(jsonResponse({ message: { ok: true } }));
-      }
-      return broker.fetchImpl(input, init);
-    });
+    // The stub FF1 learns the grant as the broker issues it.
+    const relay = deviceOnRelay({});
     let shownLink: string | undefined;
     const statuses: string[] = [];
     let resolved = false;
     const handle = mountPlayOnArtComputerButton({
       container: "#play-button-container",
-      playlist: { dpVersion: "1.1.0", title: "Needs Pairing Playlist", items: [] },
+      playlist,
       brokerBaseUrl,
       appLinkBaseUrl: "https://link.example/pair",
-      storage: { storage },
       pollIntervalMs: 1,
-      fetchImpl,
+      fetchImpl: broker.fetchImpl,
+      socketFactory: (url) => {
+        for (const grant of broker.issued) {
+          relay.ff1.grants[grant.ctl] = grant.sig;
+        }
+        return relay.socketFactory(url);
+      },
       document,
       createDialog: (options) => {
         expect(options.document).toBe(document);
@@ -756,13 +686,119 @@ describe("mountPlayOnArtComputerButton", () => {
     expect(resolved).toBe(true);
     expect(shownLink).toBe("https://link.example/pair?channel=ch_1&token=pt_secret_1");
     expect(fake.body.find("ff-ac-pairing-panel")).toBeUndefined();
-    expect(hasStoredEphemeralBrowserSession(storage, testOrigin)).toBe(true);
+    expect(await hasStoredEphemeralBrowserSession(testOrigin)).toBe(true);
+    expect(relay.ff1.seen[0]).toMatchObject({ ctl: broker.issued[0]?.ctl, cmd: "displayPlaylist" });
     expect(statuses).toContain("Waiting for your Art Computer.");
     expect(statuses.at(-1)).toBe("Playlist sent to Art Computer.");
   });
 
+  it("clears the grant on session_rejected so the next click re-pairs", async () => {
+    const { record, sig } = await seedGrant(testOrigin);
+    const relay = deviceOnRelay({ [record.ctl]: sig }, () => ({ ok: false, code: "access_revoked" }));
+    const { document } = fakeDocumentWithContainer();
+    let failure: unknown;
+    const handle = mountPlayOnArtComputerButton({
+      container: "#play-button-container",
+      playlist,
+      brokerBaseUrl,
+      socketFactory: relay.socketFactory,
+      document,
+      onError: (error) => {
+        failure = error;
+      }
+    });
+
+    handle.element.click();
+    await waitFor(() => failure !== undefined);
+
+    expect((failure as PlayError).code).toBe("session_rejected");
+    expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
+    expect(handle.element.textContent).toBe("Play on Art Computer");
+  });
+
+  it("does not clear a newer grant another tab stored when the old one is rejected", async () => {
+    const { record, sig } = await seedGrant(testOrigin);
+    const newer = await seedGrant("https://other.example");
+    const relay = deviceOnRelay({ [record.ctl]: sig }, () => {
+      // Another tab re-paired while this cast was in flight.
+      void replaceStoredDisplayGrant({ ...newer.record, origin: testOrigin });
+      return { ok: false, code: "access_revoked" };
+    });
+    const { document } = fakeDocumentWithContainer();
+    let failure: unknown;
+    const handle = mountPlayOnArtComputerButton({
+      container: "#play-button-container",
+      playlist,
+      brokerBaseUrl,
+      socketFactory: relay.socketFactory,
+      document,
+      onError: (error) => {
+        failure = error;
+      }
+    });
+
+    handle.element.click();
+    await waitFor(() => failure !== undefined);
+
+    expect((failure as PlayError).code).toBe("session_rejected");
+    expect((await readStoredDisplayGrant(testOrigin))?.ctl).toBe(newer.record.ctl);
+  });
+
+  it("offers Pair again on device_unrecognized and clears the grant only on the next click", async () => {
+    const { record } = await seedGrant(testOrigin);
+    // A factory-reset FF1 answers a public unknown_controller, which nothing verifies.
+    const relay = fakeRelay({ peers: [{ id: "conn_ff1", respond: () => ({ error: { code: "unknown_controller" } }) }] });
+    const broker = await fakeBroker({ waitingPolls: Number.MAX_SAFE_INTEGER });
+    const { document } = fakeDocumentWithContainer();
+    const failures: unknown[] = [];
+    let reportFailure: (() => void) | undefined;
+    let cancel: (() => void) | undefined;
+    const handle = mountPlayOnArtComputerButton({
+      container: "#play-button-container",
+      playlist,
+      brokerBaseUrl,
+      pollIntervalMs: 5,
+      fetchImpl: broker.fetchImpl,
+      socketFactory: relay.socketFactory,
+      // The stub answers at once; the verdict needs the relay deadline to pass.
+      castTimeoutMs: 300,
+      document,
+      createDialog: (options) => {
+        cancel = options.onCancel;
+        return createPairingDialog(options);
+      },
+      onError: (error) => {
+        failures.push(error);
+        reportFailure?.();
+      }
+    });
+    const firstFailure = new Promise<void>((resolve) => {
+      reportFailure = resolve;
+    });
+    handle.element.click();
+    await firstFailure;
+
+    expect((failures[0] as PlayError).code).toBe("device_unrecognized");
+    expect(handle.element.textContent).toBe("Pair again?");
+    // Not cleared: any channel peer can forge that answer.
+    expect((await readStoredDisplayGrant(testOrigin))?.ctl).toBe(record.ctl);
+
+    handle.element.click();
+    while (broker.channels.length === 0) {
+      await nextTick();
+    }
+    // The tap cleared the grant and started a new pairing.
+    expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
+    const secondFailure = new Promise<void>((resolve) => {
+      reportFailure = resolve;
+    });
+    cancel?.();
+    await secondFailure;
+    expect((failures[1] as PlayError).code).toBe("pairing_canceled");
+    expect(handle.element.textContent).toBe("Play on Art Computer");
+  });
+
   it("reports a canceled pairing without leaking tokens", async () => {
-    const storage = memoryStorage();
     const { document } = fakeDocumentWithContainer(desktopView());
     const broker = await fakeBroker({ waitingPolls: Number.MAX_SAFE_INTEGER });
     let cancel: (() => void) | undefined;
@@ -772,7 +808,6 @@ describe("mountPlayOnArtComputerButton", () => {
       container: "#play-button-container",
       playlist: { dpVersion: "1.1.0", title: "Canceled Playlist", items: [] },
       brokerBaseUrl,
-      storage: { storage },
       pollIntervalMs: 5,
       fetchImpl: broker.fetchImpl,
       document,

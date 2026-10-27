@@ -10,3 +10,4 @@ tmp
 *.lmdb
 *.mdb
 server/server
+integration/go-minter-helper/go-minter-helper

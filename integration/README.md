@@ -17,10 +17,12 @@ npm test
 ```
 
 `npm test` builds the Go broker Docker image, launches it with an isolated
-temporary `/data` volume, and verifies the mint pairing sequence over HTTP. The
+temporary `/data` volume, and verifies the mint pairing sequence over HTTP: the Go helper answers with a display
+grant for the keys the library sent, pinned to the fixture FF1 profile. The
 tests run under Node, whose `fetch` sends no `Origin` header, so they add the
 header a browser would send; the broker attests it for browser-created
-channels.
+channels. Node has no IndexedDB, where the library keeps grants, so the tests
+use `fake-indexeddb`.
 
 ## Expectations
 

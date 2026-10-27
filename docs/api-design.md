@@ -106,7 +106,8 @@ Site-initiated request (browser creator):
     "requestMessageId": "msg_...",
     "supportsPersistentSessions": true,
     "requestedExpiresInSeconds": 3600,
-    "requestedAt": "2026-09-25T20:55:00.000Z"
+    "requestedAt": "2026-09-25T20:55:00.000Z",
+    "displayGrant": { "v": 1, "sig": { "kty": "EC", "crv": "P-256", "x": "...", "y": "..." }, "enc": { "kty": "EC", "crv": "P-256", "x": "...", "y": "..." } }
   },
   "idleTtlSeconds": 300,
   "shortCodeRequested": true
@@ -137,6 +138,14 @@ Rules for a browser creator:
   answered from the announcement ignores the copy. The page reads the result
   from the start of the channel, since the answer can precede its own request.
   It must be absent on a minter create.
+- `mintRequest.displayGrant` (requester library 0.5.0 and later) announces the
+  public P-256 keys, each stripped to exactly `kty`, `crv`, `x`, `y`, that the
+  site asks the FF1 to issue a display grant to. The same member, with the
+  same keys, is inside the encrypted `mint_request`; a device that reads both
+  copies issues a grant only when they match. Its presence marks a 0.5
+  request; a request without it is a 0.4 request and gets a session. The keys
+  are public, so announcing them trusts the broker for nothing new beyond the
+  announced lifetime; the grant itself still travels end-to-end encrypted.
 - Creates are rate limited per source host with the same window and thresholds
   as the short-code resolve aggregate limit (8 per minute, then a 5-minute
   lockout); over the limit is `429 rate_limited`. Minter creates are exempt.
@@ -411,7 +420,8 @@ indexes.
 
 The browser library is embedded by the NFT display website. Public APIs hide
 broker polling and E2EE details. From 0.4.0 the library creates the channel;
-there is no pairing input. (See `docs/integration.md` for the full public API.)
+there is no pairing input. From 0.5.0 it requests a display grant and casts
+over relay v2. (See `docs/integration.md` for the full public API.)
 
 Example TypeScript shape:
 
@@ -434,21 +444,26 @@ type RequestEphemeralSessionOptions = {
 };
 
 type EphemeralBrowserSession = {
-  token: string;
-  sessionId: string;
+  deviceId: string; // the FF1 that issued the grant
+  ctl: string; // the grant's controller id, thumb(sig)
   expiresAt?: string;
-  persistent?: boolean;
-  relayerBaseUrl?: string;
+  persistent: boolean;
 };
 
 async function requestEphemeralSession(
   options: RequestEphemeralSessionOptions
 ): Promise<EphemeralBrowserSession>;
+
+async function displayDp1Playlist(options: { session: EphemeralBrowserSession; playlist: Dp1Playlist }): Promise<void>;
+async function unpairArtComputer(): Promise<void>;
 ```
 
 Required behavior:
 
-- Generate a per-channel browser ECDH key pair.
+- Generate a per-channel browser ECDH key pair, and per pairing attempt a
+  fresh non-extractable ECDSA P-256 (`sig`) and ECDH P-256 (`enc`) pair for
+  the display grant; send their public JWKs, stripped to `kty`/`crv`/`x`/`y`,
+  as `displayGrant` in both the announced and the encrypted mint request.
 - Create the channel with `creatorRole: "browser"`; the broker attests the
   origin from the `Origin` header. Do not accept caller-controlled origin in the
   public browser API.
@@ -459,15 +474,31 @@ Required behavior:
 - Encrypt the mint request before sending it; its `origin` is
   `window.location.origin`, which the device checks against the attested origin.
 - Poll only for encrypted messages addressed to `browser`.
-- Decrypt and validate channel binding before returning the token.
-- Store the token only in origin-scoped browser storage when storage is enabled.
-- Never expose raw token values through logs, analytics, or thrown error text.
+- Decrypt and validate channel binding before returning the grant. A
+  `mint_succeeded` must carry a top-level `displayGrant`
+  `{v:1, ctl, profile{v,dev,gen,sig,enc}, relayV2Endpoint, expiresAt?}` whose
+  `ctl` is the thumbprint of the `sig` key sent and whose profile has exactly
+  those members; one that carries a `session` instead (older firmware) fails
+  with `device_unsupported` and the session is discarded. A `mint_rejected`
+  reason `display_grant_unavailable` maps to `device_unsupported`,
+  `too_many_sites` to `too_many_sites`, anything else to `mint_rejected`.
+- Store the grant, its private keys and its request counter as one record in
+  origin-scoped IndexedDB; fail with `storage_unavailable` without it. Replace
+  a stored grant only once the new one has arrived, then self-revoke the old
+  one with its old keys on a best-effort basis.
+- Cast by sealing `displayPlaylist` (the Play shape) under the grant's keys
+  and sending it over relay v2 per the FF1 control protocol v1 §10: connect
+  per cast, fan out, ACK every frame, chunk over 32 KiB, pin the first reply
+  that verifies against `profile.sig`, close. Never resend sealed bytes.
+- Never expose key material through logs, analytics, or thrown error text.
 - Send `requestedExpiresInSeconds` in the mint request only when the caller set it; the device decides the lifetime.
 - Send `supportsPersistentSessions: true` in every mint request. It is the capability flag for the owner-kept session shape: a client that can hold a session with no expiry declares it, and the device may send the nullable shape only to a requester that did.
-- Treat a session with a null or absent `expiresAt` (`persistent: true`) as valid until it is revoked.
+- Treat a grant with a null or absent `expiresAt` (`persistent: true`) as valid until it is revoked.
 
 Requester library versions before 0.4.0 join a device-created channel from a
-QR payload or short code instead; the broker still serves that path.
+QR payload or short code instead; the broker still serves that path. Versions
+before 0.5.0 send no `displayGrant`, receive a session, and cast through the
+legacy `ff-relayer` `/api/cast`.
 
 ## Mint Library API
 
@@ -537,6 +568,14 @@ type MintResult struct {
 `Persistent` marks a session the device owner kept until they remove it:
 `feral-controld` sets it, the encrypted session payload carries
 `"persistent": true` with a null `expiresAt`, and `ExpiresAt` is ignored.
+
+For a 0.5 request (one carrying `displayGrant` keys) the host issues a display
+grant instead of a session and answers `mint_succeeded` with a top-level
+`displayGrant` `{v, ctl, profile{v,dev,gen,sig,enc}, relayV2Endpoint,
+expiresAt?}` and no `session`; an absent `expiresAt` means the owner kept the
+site. Refusals are `mint_rejected` with reason `display_grant_unavailable`
+(invalid keys, no relay v2 endpoint, or a durability failure) or
+`too_many_sites`. See the Go package README ("Display grants").
 
 The owner-kept shape is gated on the requester's capability. A request without
 `supportsPersistentSessions` decodes as incapable — the browser library sends it

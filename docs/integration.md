@@ -28,19 +28,22 @@ What the visitor experiences:
    joins, then "Approve in the Feral File app…". A code lasts five minutes;
    if it runs out, the dialog shows a fresh one, up to twice.
 3. The playlist plays on their Art Computer. Subsequent plays from your site
-   skip pairing entirely — the browser session is remembered per site origin
+   skip pairing entirely — the display grant is remembered per site origin
    until it expires or is removed.
 
 The visitor never opens a settings page on the Art Computer or carries a code
 from it to your site: your site shows the request, and the app that holds the
 authority accepts it.
 
-Your site never receives device API keys or account credentials. It receives a
-revokable browser session token scoped to the display path only — short-lived
-by default, or kept until the owner removes it when they choose that.
-The mint request and the returned session travel end-to-end encrypted between
-the visitor's browser and their FF1, so the broker in the middle never sees
-session tokens or playlist content. The broker does see what channel creation
+Your site never receives device API keys or account credentials. The FF1
+issues the visitor's browser a **display grant**: a display-only controller
+record of the FF1 control protocol, bound to keys the browser generates and
+never exports, that can do one thing — play a playlist — and that the owner
+can revoke in the app. It is short-lived by default, or kept until the owner
+removes it when they choose that. The mint request and the returned grant
+travel end-to-end encrypted between the visitor's browser and their FF1, and
+every cast is a signed, encrypted envelope the FF1 verifies, so neither the
+broker nor the relay in the middle sees playlist content or can forge a play. The broker does see what channel creation
 sends in the clear: your site's origin, the browser metadata you supply in
 `browserInfo`, and the pairing code it issues. Your origin is attested, not
 claimed: the broker takes it from the `Origin` header your visitor's browser
@@ -66,7 +69,10 @@ full model is in [Sequential Flow](sequential-flow.md).
   hosted Mint Pairing Broker at `https://handoff.feralfile.com` is the default
   and is open for integration use.
 
-Your visitor needs an FF1 and the Feral File mobile app with their FF1 added.
+Your visitor needs an FF1 on FF OS with display grants, the Feral File mobile
+app with their FF1 added, and a browser with IndexedDB (every evergreen
+browser; a private window that blocks site data fails with
+`storage_unavailable`).
 
 ## Quickest path: mount the button
 
@@ -76,17 +82,16 @@ import { mountPlayOnArtComputerButton } from "@feralfile/play";
 mountPlayOnArtComputerButton({
   container: "#play-on-art-computer",
   playlist: () => buildDp1PlaylistFromSelection(),
-  brokerBaseUrl: "https://handoff.feralfile.com",
-  // Fallback when the session carries no relayer URL; the host from Network endpoints.
-  relayerBaseUrl: "https://tv-cast-coordination.autonomy-system.workers.dev"
+  brokerBaseUrl: "https://handoff.feralfile.com"
 });
 ```
 
-This renders the button, and on click: checks origin-scoped `localStorage` for
-a valid browser session; when there is none, creates a pairing channel and
+This renders the button, and on click: checks origin-scoped IndexedDB for a
+valid display grant; when there is none, creates a pairing channel and
 shows the pairing dialog (app button on a phone, QR on a desktop, the
 six-digit code on both); waits for the Art Computer to join and the owner to
-approve in the app; then sends the playlist to the FF1.
+approve in the app; then seals the playlist under the grant's keys and sends
+it to the FF1 over relay v2.
 
 `playlist` and `brokerBaseUrl` accept either a value or a (possibly async)
 function, so you can build the DP-1 document at click time from the visitor's
@@ -109,20 +114,20 @@ Useful options (see `PlayOnArtComputerButtonOptions` in
   when it is installed and offers the install otherwise. The link carries no
   broker URL: the Art Computer joins on the broker it is configured for.
 - `onStatusChange`, `onSuccess`, `onError` — drive your own status UI.
+- `pairAgainLabel` — the button label after `device_unrecognized` (default
+  "Pair again?"); the next click clears the grant and pairs again.
+- `socketFactory`, `castTimeoutMs` — a custom `WebSocket` opener and the
+  per-cast relay deadline, passed through to `displayDp1Playlist`.
 - `browserInfo` — `{ name, userAgent, label }` shown to the user in the
   mobile-app approval prompt. Set `label` to something the visitor will
   recognize, e.g. your site name.
-- `relayerBaseUrl` — fallback relayer for a session that carries no URL of its
-  own; `session.relayerBaseUrl` wins when present, and without the fallback
-  such a session fails with `relayer base URL is required`. Set it to the host
-  in [Network endpoints](#network-endpoints).
-- `requestedExpiresInSeconds` — session lifetime your site asks for, a whole
+- `requestedExpiresInSeconds` — grant lifetime your site asks for, a whole
   number of seconds from 1 to 31536000; a value outside that throws where you
-  set it, stored session or not. The Art Computer clamps every timed session to
+  set it, stored grant or not. The Art Computer clamps every timed grant to
   86400 seconds (one day), so a longer request gets one day, and the approval
   sheet shows the clamped duration. Leave it unset to take the device default.
   The device owner decides: if they keep your site paired, the request is
-  ignored and the session has no expiry.
+  ignored and the grant has no expiry.
 
 ## Custom UI path
 
@@ -133,7 +138,8 @@ import {
   requestEphemeralSessionWithPairingUi,
   displayDp1Playlist,
   hasStoredEphemeralBrowserSession,
-  clearStoredEphemeralBrowserSession
+  clearStoredEphemeralBrowserSession,
+  unpairArtComputer
 } from "@feralfile/play";
 
 const session = await requestEphemeralSessionWithPairingUi({
@@ -141,15 +147,10 @@ const session = await requestEphemeralSessionWithPairingUi({
   browserInfo: { label: "My Gallery" }
 });
 
-await displayDp1Playlist({
-  session,
-  playlist,
-  // Fallback when the session carries no relayer URL; the host from Network endpoints.
-  relayerBaseUrl: "https://tv-cast-coordination.autonomy-system.workers.dev"
-});
+await displayDp1Playlist({ session, playlist });
 ```
 
-- `requestEphemeralSessionWithPairingUi` reuses a stored session when one
+- `requestEphemeralSessionWithPairingUi` reuses a stored grant when one
   exists, otherwise creates a channel, shows the pairing dialog, and waits for
   the Art Computer and the approval. It replaces an expired channel up to
   twice, then fails with `approval_timeout`. Pass `createDialog` to replace
@@ -179,33 +180,46 @@ await displayDp1Playlist({
   The app link carries the channel's single-use pairing token. It dies with
   the channel after five minutes idle, but until then it admits one Art
   Computer: show it to the visitor, do not log it or send it to analytics.
-- `displayDp1Playlist` owns the relayer request envelope and response
-  validation. Website code never constructs relayer commands directly.
+- `displayDp1Playlist` owns the control envelope (sealing, the relay v2
+  round trip, reply verification against the FF1's pinned profile). Website
+  code never constructs envelopes or relay frames directly. It opens one relay
+  socket per cast and closes it right after.
+- `unpairArtComputer()` sends a best-effort self-revoke to the FF1 with the
+  stored keys, then deletes the grant. `clearStoredEphemeralBrowserSession(origin)`
+  only deletes it (synchronously) and tells the FF1 nothing;
+  `hasStoredEphemeralBrowserSession(origin)` is async.
 
-## Sessions
+## Display grants
 
-- A session is `{ token, sessionId, expiresAt?, persistent?, relayerBaseUrl? }`.
-  The token is a bearer credential: do not log it, report it to analytics, or
-  expose it in thrown errors.
-- Stored in `localStorage` under `ff:ephemeral-browser-session:<origin>`,
-  scoped to your site's origin. Pass `storage: false` to manage persistence
-  yourself.
+- A pairing is `{ deviceId, ctl, expiresAt?, persistent }`: the FF1 that
+  issued the grant, the grant's controller id, and its lifetime. There is no
+  token. The grant's P-256 keys are generated non-extractable in the browser,
+  never leave it, and are stored with the grant and its request counter as one
+  IndexedDB record (database `ff-play`, store `displayGrants`, keyed by your
+  site's origin). Every pairing generates fresh keys.
+- IndexedDB is required: without it, or with `storage: false`, pairing fails
+  with `storage_unavailable`.
 - Approving in the app, the device owner can keep your site paired until they
-  remove it (Settings → Art Computers → the FF1 → Paired sites). Such a session
+  remove it (Settings → Art Computers → the FF1 → Paired sites). Such a grant
   comes back with `persistent: true` and no `expiresAt`: it does not expire,
-  and any `requestedExpiresInSeconds` your site asked for is ignored. Sessions
+  and any `requestedExpiresInSeconds` your site asked for is ignored. Grants
   the owner does not keep carry an `expiresAt` and expire as before.
-- Keeping a site paired takes effect only for sites on `@feralfile/play` 0.3.0
-  or newer. Each request declares the capability, and the device sends the
-  no-expiry shape only to a site that declared it; a site on an older version
-  gets a timed session even when the owner chose to keep it. Upgrading the
-  library is the whole fix — nothing changes on the device.
-- Expiry and revocation are enforced by `ff-relayer`. The user can revoke a
-  browser session from the Feral File side at any time.
-- On a display attempt with a dead session the library throws a `PlayError`
-  with code `session_rejected`; the wrapped button clears the stored session
-  automatically so the next click re-pairs. Custom integrations should call
-  `clearStoredEphemeralBrowserSession` on that code and prompt to pair again.
+- A grant can only play a playlist: the FF1 refuses any other command from it.
+  Expiry and revocation are enforced by the FF1 itself; the owner can remove
+  the site in the app at any time, and the site can `unpairArtComputer()`.
+- On a cast the FF1 answers with a verified `access_revoked` or `expired`, or
+  with the grant past its `expiresAt`, the library throws a `PlayError` with
+  code `session_rejected` and deletes the grant; the wrapped button then
+  re-pairs on the next click. Custom integrations should prompt to pair again.
+- On a cast some channel peer answers with an unverified `unknown_controller`
+  or `bad_envelope` and nothing verified arrives, the library throws
+  `device_unrecognized` and **keeps** the grant: anyone on the public channel
+  can send that body. The wrapped button offers "Pair again?" and clears the
+  grant only on the visitor's next click. This is how a site recovers after
+  the FF1 was factory reset or the site was removed on the device.
+- Upgrading from 0.4: stored session records are ignored and removed on first
+  use, so each visitor pairs once more, and the old session row stays under
+  Paired sites until it expires or the owner removes it.
 
 ## Errors
 
@@ -216,11 +230,16 @@ codes will not. `pairingErrorMessage(error)` maps them to user-facing text.
 | `error.code` | Meaning |
 | :-- | :-- |
 | `pairing_code_expired` | The channel expired before an Art Computer joined (headless `requestEphemeralSession` with no `channelRegenerations`). Press play again for a fresh code. |
-| `mint_rejected` | User declined the approval in the mobile app. |
-| `approval_timeout` | No approval within `maxWaitMs` (default 5 minutes) after the Art Computer joined, or every replacement channel expired before one joined. |
-| `session_rejected` | Stored session expired or revoked — the wrapped button clears it; custom integrations clear and re-pair. |
+| `mint_rejected` | The owner declined the approval in the mobile app, or the FF1 refused the request for another reason. |
+| `approval_timeout` | Nobody approved: no answer within `maxWaitMs` (default 5 minutes) after the Art Computer joined, the FF1's own 5-minute approval deadline passed (`mint_rejected` reason `approval_expired`, mapped to this code), or every replacement channel expired before one joined. |
+| `device_unsupported` | The FF1 cannot issue a display grant: its FF OS predates display grants, or it has no relay v2 endpoint configured. Tell the visitor to update the Art Computer. |
+| `too_many_sites` | The FF1 holds as many paired sites as it allows (16). The owner removes one under Paired sites first. |
+| `storage_unavailable` | IndexedDB is unavailable (or `storage: false`), so the grant and its keys cannot be kept. |
+| `session_rejected` | The grant expired or was revoked (a verified FF1 reply) — the library deletes it and the wrapped button re-pairs on the next click; custom integrations prompt to pair again. |
+| `device_unrecognized` | The FF1 answered that it does not know this grant, but unverified. The grant is kept; the wrapped button offers "Pair again?", custom integrations ask the visitor before clearing. |
 | `pairing_canceled` | User closed the pairing dialog, or your `signal` aborted. |
-| `display_failed` / `display_rejected` | The relayer or FF1 refused the display request. |
+| `display_rejected` | The FF1 verified the request and refused it (`permission_denied`, or the player failed). |
+| `display_failed` | This page's pairing was replaced by another tab's (reload and play again), the FF1 is offline (no peer on its relay channel), the relay refused the connection (its per-address cap: more than 6 tabs casting at once from one network answer "Too many casts at once…"), no verified reply arrived before the deadline, the relay dropped the connection after the send, or the FF1 reported a replayed request. Nothing is resent automatically: press play again. |
 
 ## Network endpoints
 
@@ -229,21 +248,22 @@ The visitor's browser talks to two hosts. If your site sets a
 
 - the Mint Pairing Broker (`https://handoff.feralfile.com`) — channel
   creation, encrypted message send/poll, channel close
-- `ff-relayer` — the display request. Allow
-  `https://tv-cast-coordination.autonomy-system.workers.dev`, the relayer Feral
-  File operates today; you have to write the policy before any session exists.
-  The approved session then carries the base URL actually used
-  (`session.relayerBaseUrl`) — read it from there at runtime rather than
-  hard-coding a host in your display code. If the host changes, the change is
-  announced in the release notes for `@feralfile/play`.
+- the relay v2 host — the cast, as a WebSocket
+  (`wss://<relay host>/v2/channels/<deviceId>/connections`), so allow it with
+  the `wss:` scheme. The FF1 names the host in the grant it issues
+  (`relayV2Endpoint`), and the library uses only that; you have to write the
+  policy before any grant exists, so allow the relay v2 host Feral File
+  announces in the release notes for `@feralfile/play`. The 0.4 relayer host
+  (`tv-cast-coordination.autonomy-system.workers.dev`) is no longer used.
 
 `https://link.feralfile.com` needs no entry. The app link is a navigation (the
 visitor taps it, or scans its QR with another device), never a `fetch`, and the
 QR is drawn in the page from the bundled library, with no image request.
 
-Playlist content does not travel through either host: the browser sends the
-DP-1 document to the relayer as part of the display command, and artwork media
-is fetched directly by the FF1 from the URLs inside the playlist.
+Playlist content is readable by neither host: the browser sends the DP-1
+document to the FF1 inside the encrypted envelope the relay forwards, and
+artwork media is fetched directly by the FF1 from the URLs inside the
+playlist.
 
 ## Try it against the sample
 
@@ -259,22 +279,43 @@ uses the hosted broker by default, so no local server is needed.
 
 ## Status
 
-This guide documents `@feralfile/play` 0.4.0, where the site starts pairing.
-Libraries up to 0.3.x paired the other way — the Art Computer showed a code
-and the visitor typed it into the site — and the hosted broker still serves
-that path for sites that have not upgraded. Upgrading from 0.3.x: drop the
-`pairing` input from `requestEphemeralSession` and pass `brokerBaseUrl` plus
-`onPairingMaterial`; rename `createPairingCodeDialog` to `createPairingDialog`;
-stop matching `pairing_code_not_found` and `pairing_code_used`, which a site
-can no longer hit. The wrapped button needs no change.
+This guide documents `@feralfile/play` 0.5.0, which casts only with a
+device-issued display grant over relay v2. It is a breaking 0.x release:
 
-Site-initiated pairing needs Art Computer software 2.0.10 or later and a
-Feral File app with **Pair a site** in the Art Computer's settings; both are
-released. The hosted broker, the mobile-app approval flow, and the FF1 display
-path are the same for both directions. One honest
-caveat while this is pre-1.0: expect additive API change between 0.x versions.
-Sessions authorize the display/cast path only — that is by design, and the
-scope will stay narrow.
+- `EphemeralBrowserSession` is `{ deviceId, ctl, expiresAt?, persistent }`;
+  `token`, `sessionId` and `relayerBaseUrl` are gone, as is the
+  `relayerBaseUrl` option everywhere.
+- `storage` is a boolean (`GrantStorageOptions`); the grant lives in IndexedDB,
+  not `localStorage`, and there is no custom storage adapter:
+  `TokenStorage`, `TokenStorageOptions`, `ephemeralBrowserSessionStorageKey`
+  and `storeEphemeralBrowserSession` are gone.
+  `hasStoredEphemeralBrowserSession(origin)` and
+  `readStoredEphemeralBrowserSession(origin)` are async and take only the
+  origin, as does `clearStoredEphemeralBrowserSession(origin)`;
+  `unpairArtComputer()` is new.
+- `DisplayDp1PlaylistOptions` loses `fetchImpl` (there is no HTTP cast) and
+  gains `socketFactory` (a custom `WebSocket` opener) and `timeoutMs`.
+- New error codes: `device_unsupported`, `device_unrecognized`,
+  `storage_unavailable`, `too_many_sites`.
+- Stored 0.4 session records are removed on first use; every visitor pairs
+  once more after a site upgrades.
+
+Which library works with which Art Computer:
+
+| Art Computer | `@feralfile/play` | Result |
+| :-- | :-- | :-- |
+| FF OS without display grants | 0.4 | browser session, as before |
+| FF OS without display grants | 0.5 | `device_unsupported` (the device mints a session, which 0.5 discards; the row stays under Paired sites until it expires or is removed) |
+| FF OS with display grants | 0.4 | browser session, unchanged, until the legacy controller API is retired |
+| FF OS with display grants | 0.5 | display grant, cast over relay v2 |
+| FF OS with display grants, not yet secured (no owner), legacy controller API retired | 0.5 | existing grants keep casting; a new pairing ends in `approval_timeout` (the request is sent, but no app receives it; whichever of the library's `maxWaitMs` and the FF1's approval deadline passes first) until the owner secures the FF1 in the app |
+| any, legacy controller API retired | 0.4 | broken: upgrade to 0.5 first |
+
+Upgrade to 0.5 once Feral File announces that FF OS with display grants is
+broadly deployed; before that, visitors on older Art Computers get
+`device_unsupported`. One honest caveat while this is pre-1.0: expect API
+change between 0.x versions. A display grant authorizes the display/cast path
+only — that is by design, and the scope will stay narrow.
 
 Tell us what is unclear, impractical, or missing — open an issue on this repo.
 Integration questions and API-shape feedback are exactly what this stage is

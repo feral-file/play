@@ -73,9 +73,9 @@
 
     <script type="module">
       import {
-        clearStoredEphemeralBrowserSession,
         hasStoredEphemeralBrowserSession,
-        mountPlayOnArtComputerButton
+        mountPlayOnArtComputerButton,
+        unpairArtComputer
       } from "@feralfile/play";
 
       const brokerUrlInput = mustElement("broker-url");
@@ -98,7 +98,11 @@
       }
 
       function updateSessionStatus() {
-        sessionStatus.textContent = hasStoredEphemeralBrowserSession(localStorage, window.location.origin) ? "Paired" : "Not paired";
+        hasStoredEphemeralBrowserSession(window.location.origin).then((paired) => {
+          sessionStatus.textContent = paired ? "Paired" : "Not paired";
+        }, () => {
+          sessionStatus.textContent = "Storage unavailable";
+        });
       }
 
       function dp1Payload() {
@@ -120,8 +124,6 @@
           playlist: dp1Payload,
           brokerBaseUrl: () => brokerUrlInput.value.trim(),
           appLinkBaseUrl: appLinkBaseUrlInput.value.trim(),
-          // Fallback when the session carries no relayer URL; the host from Network endpoints.
-          relayerBaseUrl: "https://tv-cast-coordination.autonomy-system.workers.dev",
           browserInfo: {
             name: navigator.userAgent.includes("Chrome") ? "Chrome" : "Browser",
             userAgent: navigator.userAgent,
@@ -151,9 +153,16 @@
       mountPlayButton();
 
       forgetButton.addEventListener("click", () => {
-        clearStoredEphemeralBrowserSession(localStorage, window.location.origin);
-        updateSessionStatus();
-        setMessage("Stored session cleared.");
+        forgetButton.disabled = true;
+        // Tells the Art Computer first (best effort), then forgets the grant.
+        unpairArtComputer().then(() => {
+          setMessage("Unpaired from the Art Computer.");
+        }, (error) => {
+          setMessage(error instanceof Error ? error.message : "Could not unpair.");
+        }).finally(() => {
+          forgetButton.disabled = false;
+          updateSessionStatus();
+        });
       });
 
       updateSessionStatus();

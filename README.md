@@ -17,22 +17,26 @@ Feral File mobile app brings the visitor's FF1 to that channel. On the device,
 `feral-controld` embeds the [Go ephemeral token minter](clients/ephemeral-token-minter/go),
 which joins the channel and carries the site's encrypted request and the
 result; `feral-controld` asks the owner for approval in the Feral File mobile
-app via `ff-relayer` and mints a revokable browser session scoped to the
-display path. The full flow is documented in
+app via `ff-relayer` and issues the browser a revokable display grant scoped
+to the display path. The full flow is documented in
 [docs/sequential-flow.md](docs/sequential-flow.md).
 
 The hosted broker at `https://handoff.feralfile.com`, the mobile-app approval,
-and the FF1 display path work end to end today. `@feralfile/play` 0.4.0 starts
-pairing from the site; 0.3.x paired from the device, and the broker keeps
-serving that path for sites that have not upgraded. The
-integration surface is pre-1.0: expect additive change, and open issues freely
-— integration feedback is exactly what this stage is for.
+and the FF1 display path work end to end today. `@feralfile/play` 0.5.0 casts
+only with a device-issued display grant over relay v2 and needs FF OS with
+display grants; 0.4.0 started pairing from the site and cast with a relayer
+session token; 0.3.x paired from the device, and the broker keeps serving that
+path for sites that have not upgraded. The integration surface is pre-1.0:
+expect change between 0.x versions, and open issues freely — integration
+feedback is exactly what this stage is for.
 
-Production Play pairs through the Mint Pairing Broker and casts over the
-existing `ff-relayer` `/api` transport, and stays there until browser display grants are
-defined in the FF1 control protocol (feral-file/feral-file#3551). This library
-has no relay v2 carrier: when display grants exist, it will be ported from
-the maintained ff-cli client rather than kept as a second copy.
+Play pairs through the Mint Pairing Broker. From 0.5.0 it casts over relay v2
+with a display grant of the FF1 control protocol (ffos-user
+`docs/ff1-control-v1.md` §5.7);
+the relay client and codec under `clients/session-recipient/js/src/control`
+are a port of the maintained ff-cli client, kept in step with it rather than
+diverging. 0.4 sites keep casting over the legacy `ff-relayer` `/api`
+transport until that API is retired.
 
 ## Components
 
