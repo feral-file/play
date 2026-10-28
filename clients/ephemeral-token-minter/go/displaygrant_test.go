@@ -44,7 +44,7 @@ func testDisplayGrantResult() *DisplayGrantResult {
 			Sig:     json.RawMessage(`{"kty":"EC","crv":"P-256","x":"sx","y":"sy"}`),
 			Enc:     json.RawMessage(`{"kty":"EC","crv":"P-256","x":"ex","y":"ey"}`),
 		},
-		RelayV2Endpoint: "wss://relay.example/v2",
+		RelayV2Endpoint: "wss://relay.example",
 		ExpiresAt:       "2026-06-16T11:00:00Z",
 	}
 }
@@ -59,7 +59,7 @@ func TestSendMintSuccessGoldenBytes(t *testing.T) {
 	kept := MintResult{SessionID: "eps_kept", Token: "browser-token-secret", Persistent: true}
 	const prefix = `{"v":1,"type":"mint_succeeded","channelId":"ch_test","requestMessageId":"msg_browser",`
 	const timedSession = `"session":{"sessionId":"eps_123","token":"browser-token-secret","expiresAt":"2026-06-16T11:00:00Z","relayerBaseUrl":"https://relayer.example"}`
-	const grant = `"displayGrant":{"v":1,"ctl":"ctl_site","profile":{"v":1,"dev":"FF1-TEST","gen":"gen_1","sig":{"kty":"EC","crv":"P-256","x":"sx","y":"sy"},"enc":{"kty":"EC","crv":"P-256","x":"ex","y":"ey"}},"relayV2Endpoint":"wss://relay.example/v2","expiresAt":"2026-06-16T11:00:00Z"}`
+	const grant = `"displayGrant":{"v":1,"ctl":"ctl_site","profile":{"v":1,"dev":"FF1-TEST","gen":"gen_1","sig":{"kty":"EC","crv":"P-256","x":"sx","y":"sy"},"enc":{"kty":"EC","crv":"P-256","x":"ex","y":"ey"}},"relayV2Endpoint":"wss://relay.example","expiresAt":"2026-06-16T11:00:00Z"}`
 	keptGrant := testDisplayGrantResult()
 	keptGrant.ExpiresAt = ""
 
@@ -152,19 +152,23 @@ func TestSendMintSuccessResultRefusals(t *testing.T) {
 		success   MintSuccess
 		grantKeys bool
 	}{
-		"neither":                {success: MintSuccess{}, grantKeys: true},
-		"grant without keys":     {success: MintSuccess{DisplayGrant: testDisplayGrantResult()}},
-		"both without keys":      {success: MintSuccess{Session: session, DisplayGrant: testDisplayGrantResult()}},
-		"session without token":  {success: MintSuccess{Session: &MintResult{ExpiresAt: time.Now()}}, grantKeys: true},
-		"grant version":          {success: MintSuccess{DisplayGrant: mutate(func(g *DisplayGrantResult) { g.Version = 2 })}, grantKeys: true},
-		"profile version":        {success: MintSuccess{DisplayGrant: mutate(func(g *DisplayGrantResult) { g.Profile.Version = 0 })}, grantKeys: true},
-		"missing ctl":            {success: MintSuccess{DisplayGrant: mutate(func(g *DisplayGrantResult) { g.Ctl = "" })}, grantKeys: true},
-		"missing relay endpoint": {success: MintSuccess{DisplayGrant: mutate(func(g *DisplayGrantResult) { g.RelayV2Endpoint = "" })}, grantKeys: true},
-		"missing dev":            {success: MintSuccess{DisplayGrant: mutate(func(g *DisplayGrantResult) { g.Profile.Dev = "" })}, grantKeys: true},
-		"missing profile sig":    {success: MintSuccess{DisplayGrant: mutate(func(g *DisplayGrantResult) { g.Profile.Sig = nil })}, grantKeys: true},
-		"expiresAt not RFC 3339": {success: MintSuccess{DisplayGrant: mutate(func(g *DisplayGrantResult) { g.ExpiresAt = "tomorrow" })}, grantKeys: true},
-		"grant with bad session": {success: MintSuccess{Session: &MintResult{Token: "tok"}, DisplayGrant: testDisplayGrantResult()}, grantKeys: true},
-		"persistent unsupported": {success: MintSuccess{Session: &MintResult{Token: "tok", Persistent: true}}, grantKeys: true},
+		"neither":                 {success: MintSuccess{}, grantKeys: true},
+		"grant without keys":      {success: MintSuccess{DisplayGrant: testDisplayGrantResult()}},
+		"both without keys":       {success: MintSuccess{Session: session, DisplayGrant: testDisplayGrantResult()}},
+		"session without token":   {success: MintSuccess{Session: &MintResult{ExpiresAt: time.Now()}}, grantKeys: true},
+		"grant version":           {success: MintSuccess{DisplayGrant: mutate(func(g *DisplayGrantResult) { g.Version = 2 })}, grantKeys: true},
+		"profile version":         {success: MintSuccess{DisplayGrant: mutate(func(g *DisplayGrantResult) { g.Profile.Version = 0 })}, grantKeys: true},
+		"missing ctl":             {success: MintSuccess{DisplayGrant: mutate(func(g *DisplayGrantResult) { g.Ctl = "" })}, grantKeys: true},
+		"missing relay endpoint":  {success: MintSuccess{DisplayGrant: mutate(func(g *DisplayGrantResult) { g.RelayV2Endpoint = "" })}, grantKeys: true},
+		"relay endpoint path":     {success: MintSuccess{DisplayGrant: mutate(func(g *DisplayGrantResult) { g.RelayV2Endpoint = "wss://relay.example/v2" })}, grantKeys: true},
+		"relay endpoint ws":       {success: MintSuccess{DisplayGrant: mutate(func(g *DisplayGrantResult) { g.RelayV2Endpoint = "ws://relay.example" })}, grantKeys: true},
+		"relay endpoint query":    {success: MintSuccess{DisplayGrant: mutate(func(g *DisplayGrantResult) { g.RelayV2Endpoint = "wss://relay.example?x=1" })}, grantKeys: true},
+		"relay endpoint userinfo": {success: MintSuccess{DisplayGrant: mutate(func(g *DisplayGrantResult) { g.RelayV2Endpoint = "wss://u:p@relay.example" })}, grantKeys: true},
+		"missing dev":             {success: MintSuccess{DisplayGrant: mutate(func(g *DisplayGrantResult) { g.Profile.Dev = "" })}, grantKeys: true},
+		"missing profile sig":     {success: MintSuccess{DisplayGrant: mutate(func(g *DisplayGrantResult) { g.Profile.Sig = nil })}, grantKeys: true},
+		"expiresAt not RFC 3339":  {success: MintSuccess{DisplayGrant: mutate(func(g *DisplayGrantResult) { g.ExpiresAt = "tomorrow" })}, grantKeys: true},
+		"grant with bad session":  {success: MintSuccess{Session: &MintResult{Token: "tok"}, DisplayGrant: testDisplayGrantResult()}, grantKeys: true},
+		"persistent unsupported":  {success: MintSuccess{Session: &MintResult{Token: "tok", Persistent: true}}, grantKeys: true},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -330,5 +334,15 @@ func TestParseDisplayGrantKeys(t *testing.T) {
 				t.Fatalf("err = %v, want ErrInvalidDisplayGrant", err)
 			}
 		})
+	}
+}
+
+func TestDisplayGrantAcceptsBareRelayOrigins(t *testing.T) {
+	for _, endpoint := range []string{"wss://relay.example", "https://relay.example/", "wss://relay.example:8443"} {
+		grant := testDisplayGrantResult()
+		grant.RelayV2Endpoint = endpoint
+		if err := grant.validate(); err != nil {
+			t.Fatalf("%s: %v", endpoint, err)
+		}
 	}
 }
