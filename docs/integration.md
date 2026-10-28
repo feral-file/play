@@ -248,23 +248,13 @@ The visitor's browser talks to two hosts. If your site sets a
 
 - the Mint Pairing Broker (`https://handoff.feralfile.com`) — channel
   creation, encrypted message send/poll, channel close
-- the relay (`wss://tv-cast-coordination.autonomy-system.workers.dev`) — the
-  cast, as a WebSocket to
-  `/v2/channels/<deviceId>/connections` on that host. List it with the `wss:`
-  scheme: an `https:` entry for the same host does not cover a WebSocket in
-  every browser, so do not rely on one. This is the same host 0.4 cast
-  through over HTTPS; relay v2 is served by that same relay, so there is no
-  new host, but a 0.4 policy that lists only
-  `https://tv-cast-coordination.autonomy-system.workers.dev` must add the
-  `wss:` entry.
-
-The FF1 names the relay endpoint in the grant it issues (`relayV2Endpoint`, a
-bare origin), and the library connects only there. You configure no relay URL
-and add no other host:
-
-```http
-Content-Security-Policy: connect-src 'self' https://handoff.feralfile.com wss://tv-cast-coordination.autonomy-system.workers.dev
-```
+- the relay v2 host — the cast, as a WebSocket
+  (`wss://<relay host>/v2/channels/<deviceId>/connections`), so allow it with
+  the `wss:` scheme. The FF1 names the host in the grant it issues
+  (`relayV2Endpoint`), and the library uses only that; you have to write the
+  policy before any grant exists, so allow the relay v2 host Feral File
+  announces in the release notes for `@feralfile/play`. The 0.4 relayer host
+  (`tv-cast-coordination.autonomy-system.workers.dev`) is no longer used.
 
 `https://link.feralfile.com` needs no entry. The app link is a navigation (the
 visitor taps it, or scans its QR with another device), never a `fetch`, and the

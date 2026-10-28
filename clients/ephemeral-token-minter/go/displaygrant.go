@@ -9,8 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
-	"strings"
 	"time"
 )
 
@@ -60,9 +58,6 @@ func (grant DisplayGrantResult) validate() error {
 	if grant.Ctl == "" || grant.RelayV2Endpoint == "" {
 		return errors.New("display grant ctl and relayV2Endpoint are required")
 	}
-	if !isRelayOrigin(grant.RelayV2Endpoint) {
-		return errors.New("display grant relayV2Endpoint must be a bare wss or https origin")
-	}
 	profile := grant.Profile
 	if profile.Version != 1 {
 		return fmt.Errorf("display grant profile version must be 1, got %d", profile.Version)
@@ -79,20 +74,6 @@ func (grant DisplayGrantResult) validate() error {
 		}
 	}
 	return nil
-}
-
-// isRelayOrigin applies the requester library's rule for a grant's relay
-// endpoint: a wss: or https: origin with no credentials, query, fragment, or
-// path other than "/". The library appends /v2/channels/<deviceId>/connections
-// itself and refuses any grant that fails this.
-func isRelayOrigin(endpoint string) bool {
-	u, err := url.Parse(endpoint)
-	if err != nil {
-		return false
-	}
-	return (u.Scheme == "wss" || u.Scheme == "https") && u.Host != "" && u.User == nil &&
-		u.Opaque == "" && (u.Path == "" || u.Path == "/") && u.RawQuery == "" && !u.ForceQuery &&
-		u.Fragment == "" && !strings.HasSuffix(endpoint, "#")
 }
 
 // ParseDisplayGrantKeys validates a requester's raw displayGrant member,

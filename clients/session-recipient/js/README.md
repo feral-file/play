@@ -46,11 +46,11 @@ mountPlayOnArtComputerButton({
 ```
 
 The relay endpoint arrives inside the grant (`relayV2Endpoint`) and is the only
-one used, so you configure no relay URL. A `Content-Security-Policy` needs
-`connect-src` entries for the broker and for
-`wss://tv-cast-coordination.autonomy-system.workers.dev`, the existing relay
-host that also serves relay v2: the
-[Integration Guide](../../../docs/integration.md#network-endpoints) lists them.
+one used, so never hard-code a host in display code. A
+`Content-Security-Policy` still has to be written before any grant exists, so
+`connect-src` needs the relay v2 host up front: the
+[Integration Guide](../../../docs/integration.md#network-endpoints) lists the
+hosts to allow.
 
 On a touch device (phone or tablet) the dialog shows an
 **Open the Feral File app** link and, below it, the six-digit code, which
