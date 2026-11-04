@@ -12,7 +12,7 @@ broker still serves for older requester library versions (see
 Parties:
 
 - NFT display website: the website where the user selects works, exposes a DP1
-  feed URL for playback, and runs the token requester browser library
+  feed URL for display, and runs the token requester browser library
   (`clients/session-recipient/js/`). The library creates the channel and shows
   an app link (a button on a phone, a QR code on a desktop) and a six-digit code.
 - Feral File app (`ff-controller`): brings the Art Computer to the site's
@@ -39,7 +39,7 @@ pair. The broker does not interpret mint requests, tokens, or DP1 playlist
 content.
 
 What the FF1 issues the browser depends on the requester library. From
-`@feralfile/play` 0.5.0 the request carries display-grant keys and the FF1
+`@feralfile/display` 0.5.0 the request carries display-grant keys and the FF1
 answers with a **display grant** (FF1 control protocol v1 §5.7): a display-only
 controller record bound to keys the browser generated, pinning the FF1's
 profile and naming its relay v2 endpoint. The browser then casts by sealing
@@ -118,7 +118,7 @@ sequenceDiagram
     NFTSite->>NFTSite: Seal displayPlaylist (DP1 document) under the grant keys
     NFTSite->>Relayer: wss /v2/channels/{deviceId}/connections: fan out the sealed envelope, ACK frames
     Relayer->>Feral: Forward the envelope to the FF1 peer
-    Feral->>Feral: Open, admit the display grant, resolve DP1 and play through Chromium/frontend
+    Feral->>Feral: Open, admit the display grant, resolve DP1 and display through Chromium/frontend
     Feral-->>Relayer: Sealed reply (ok / code)
     Relayer-->>NFTSite: Reply verified against the pinned profile; socket closed
 ```
@@ -224,7 +224,7 @@ legacy flow the FF1 frontend presents the pairing QR/deep-link or short code
 returned by the library. `feral-controld` owns approval orchestration, `ff-relayer` session creation, and topic authority.
 The FF1 display path receives the relayer cast command after the browser
 presents a valid ephemeral session, fetches the DP1 feed URL directly, resolves
-DP1 content, and plays it through Chromium/frontend. The device path, not
+DP1 content, and displays it through Chromium/frontend. The device path, not
 `ff-controller`, fetches playlist content.
 
 ## Security Notes
