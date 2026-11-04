@@ -589,7 +589,7 @@ describe("session UI helpers", () => {
 describe("mountDisplayOnArtComputerButton", () => {
   const playlist = { dpVersion: "1.1.0", title: "Stored Grant Playlist", items: [] };
 
-  it("casts over relay v2 with a stored grant without creating the pairing dialog", async () => {
+  it("sends over relay v2 with a stored grant without creating the pairing dialog", async () => {
     const { record, sig } = await seedGrant(testOrigin);
     const relay = deviceOnRelay({ [record.ctl]: sig });
     const { document } = fakeDocumentWithContainer();
@@ -597,7 +597,7 @@ describe("mountDisplayOnArtComputerButton", () => {
       throw new Error("dialog should not be created");
     });
     const fetchImpl = vi.fn<typeof fetch>(() => {
-      throw new Error("no HTTP request belongs in a cast");
+      throw new Error("no HTTP request belongs in a display request");
     });
     let resolved = false;
     const handle = mountDisplayOnArtComputerButton({
@@ -650,7 +650,7 @@ describe("mountDisplayOnArtComputerButton", () => {
     })).toThrow(/appLinkBaseUrl/);
   });
 
-  it("pairs through the dialog on the mounted document, then casts with the new grant", async () => {
+  it("pairs through the dialog on the mounted document, then sends with the new grant", async () => {
     const { document, fake } = fakeDocumentWithContainer(phoneView());
     const broker = await fakeBroker();
     // The stub FF1 learns the grant as the broker issues it.
@@ -729,7 +729,7 @@ describe("mountDisplayOnArtComputerButton", () => {
     const { record, sig } = await seedGrant(testOrigin);
     const newer = await seedGrant("https://other.example");
     const relay = deviceOnRelay({ [record.ctl]: sig }, () => {
-      // Another tab re-paired while this cast was in flight.
+      // Another tab re-paired while this request was in flight.
       void replaceStoredDisplayGrant({ ...newer.record, origin: testOrigin });
       return { ok: false, code: "access_revoked" };
     });

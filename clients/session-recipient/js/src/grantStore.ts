@@ -161,7 +161,7 @@ export function deleteStoredDisplayGrant(origin: string, ctl?: string): Promise<
  * one `readwrite` transaction, so two tabs sealing at once never draw the
  * same counter, and a counter is spent whether or not the request is sent.
  * With `ctl`, nothing is reserved unless the stored grant is that one: a tab
- * casting with a grant another tab has since replaced gets undefined, never
+ * sending with a grant another tab has since replaced gets undefined, never
  * a counter of the newer grant.
  */
 export function reserveCounter(origin: string, by = 1, ctl?: string): Promise<StoredDisplayGrant | undefined> {

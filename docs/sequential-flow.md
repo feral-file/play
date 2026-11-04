@@ -27,7 +27,7 @@ Parties:
   to the Go library for encrypted broker delivery.
 - `ff-relayer`: the relay service that carries commands and approval requests
   between the app and the device, and mints, lists, revokes, expires, and
-  authorizes ephemeral browser sessions for the cast/display path.
+  authorizes ephemeral browser sessions for the display path.
 - FF1 frontend: the device web UI. It displays nothing in the site-initiated
   flow; in the legacy flow it shows the device's QR/code.
 
@@ -42,12 +42,12 @@ What the FF1 issues the browser depends on the requester library. From
 `@feralfile/display` 0.5.0 the request carries display-grant keys and the FF1
 answers with a **display grant** (FF1 control protocol v1 §5.7): a display-only
 controller record bound to keys the browser generated, pinning the FF1's
-profile and naming its relay v2 endpoint. The browser then casts by sealing
+profile and naming its relay v2 endpoint. The browser then sends by sealing
 `displayPlaylist` under those keys and sending the envelope over relay v2,
-connecting per cast. Requests without those keys (0.4) get a browser session
+connecting per request. Requests without those keys (0.4) get a browser session
 token for the legacy `ff-relayer` `/api/cast` path, until that API is
 retired. DP1 playlist content must stay out of `ff-controller`, the Go token
-minter, and the Mint Pairing Broker; it travels only inside the encrypted cast
+minter, and the Mint Pairing Broker; it travels only inside the encrypted display
 envelope, and the FF1 display path fetches the feed directly.
 
 ## Sequence
@@ -186,19 +186,19 @@ receive, copy, or proxy raw browser session tokens or DP1 playlist content.
 ### ff-relayer
 
 For a display grant, `ff-relayer` is only the relay v2 transport: the browser
-opens the FF1's public device channel per cast, the relay forwards the sealed
+opens the FF1's public device channel per request, the relay forwards the sealed
 envelope and the sealed reply, and stores no session, token or permission for
 the site; revocation is an FF1 decision the relay never observes.
 
 For 0.4 sessions, `ff-relayer` owns the ephemeral session lifecycle used for display requests:
-create, list, revoke, expire, and authorize browser casts. Per
+create, list, revoke, expire, and authorize browser display requests. Per
 `feral-file/ff-relayer#13`, `feral-controld` creates sessions with
 `POST /api/ephemeral-sessions?topicID=...`, management clients can list and
 revoke with `GET /api/ephemeral-sessions?topicID=...` and
-`DELETE /api/ephemeral-sessions/{sessionID}?topicID=...`, and browsers cast with
+`DELETE /api/ephemeral-sessions/{sessionID}?topicID=...`, and browsers send with
 `Authorization: Bearer <session-token>` or
 `EPHEMERAL-SESSION: <session-token>`. Browser session tokens are accepted only
-for the allowed cast/display path and do not grant broader API-key access.
+for the allowed display path and do not grant broader API-key access.
 
 ### Mint Pairing Broker
 
@@ -222,7 +222,7 @@ library. In the site-initiated flow it receives `joinMintPairingChannel` from th
 app, joins the site's channel, and shows nothing on the FF1 frontend; in the
 legacy flow the FF1 frontend presents the pairing QR/deep-link or short code
 returned by the library. `feral-controld` owns approval orchestration, `ff-relayer` session creation, and topic authority.
-The FF1 display path receives the relayer cast command after the browser
+The FF1 display path receives the relayer `/api/cast` command after the browser
 presents a valid ephemeral session, fetches the DP1 feed URL directly, resolves
 DP1 content, and displays it through Chromium/frontend. The device path, not
 `ff-controller`, fetches playlist content.
@@ -230,12 +230,12 @@ DP1 content, and displays it through Chromium/frontend. The device path, not
 ## Security Notes
 
 - A display grant's private keys are non-extractable WebCrypto keys stored by the browser library in origin-scoped IndexedDB; the 0.4 session tokens they replace were bearer credentials and must not be logged.
-- Every cast is a fresh signed, encrypted envelope with a per-grant counter; the browser never resends sealed bytes, treats a `replay` as an unknown outcome, and accepts only replies that verify against the FF1 profile pinned at pairing. An unverified public error from the channel never deletes the grant.
+- Every display request is a fresh signed, encrypted envelope with a per-grant counter; the browser never resends sealed bytes, treats a `replay` as an unknown outcome, and accepts only replies that verify against the FF1 profile pinned at pairing. An unverified public error from the channel never deletes the grant.
 - Mint request and token response payloads are opaque to the Mint Pairing Broker and are retained only for the short pairing window.
 - `feral-controld` obtains raw token material from `ff-relayer` and passes it to the Go minter library only for E2EE requester delivery.
 - Revocation and expiry of a display grant are enforced by the FF1 (owner app, CLI or the site's own self-revoke); for 0.4 sessions by `ff-relayer`.
 - The broker records the creating site's origin from the HTTP `Origin` header, which a page running in a browser cannot forge, and the device refuses a mint request whose origin differs from it. The header binds pages, not programs: a client outside a browser can send any `Origin`, so the attestation stops one web page from impersonating another, not a server-side creator.
 - The pairing token and short code are single-use and die with the channel (idle TTL, at most 300 s). The app link carries the pairing token but no broker URL; the device always joins on its configured broker.
 - `ff-controller` approves or rejects requests but does not receive raw tokens or DP1 playlist content.
-- DP1 feed URLs travel through the browser cast request; DP1 playlist content is fetched directly by the FF1 display path.
+- DP1 feed URLs travel through the browser display request; DP1 playlist content is fetched directly by the FF1 display path.
 - Session-management actions remain controlled by `feral-controld` or another API-key-authorized party outside the Go broker/E2EE library.
