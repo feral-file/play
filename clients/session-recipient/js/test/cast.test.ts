@@ -53,7 +53,7 @@ describe("displayDp1Playlist over relay v2", () => {
     expect((await readStoredDisplayGrant(testOrigin))?.ctr).toBe(1);
   });
 
-  it("seals a fresh envelope with a new counter and rid for every cast", async () => {
+  it("seals a fresh envelope with a new counter and rid for every request", async () => {
     const { grants } = await seeded();
     const relay = deviceOnRelay(grants);
     await displayDp1Playlist({ session, playlist, socketFactory: relay.socketFactory });
@@ -142,12 +142,12 @@ describe("displayDp1Playlist over relay v2", () => {
     expect(await readStoredDisplayGrant(testOrigin)).toBeDefined();
   });
 
-  it("maps a connection the relay refuses before hello (429 capacity or rate limited) to display_failed as too many casts, not offline", async () => {
+  it("maps a connection the relay refuses before hello (429 capacity or rate limited) to display_failed as too many display requests, not offline", async () => {
     await seeded();
     const relay = fakeRelay({ peers: [{ id: "conn_ff1" }], failConnect: 1006 });
     const error = await captureError(displayDp1Playlist({ session, playlist, socketFactory: relay.socketFactory }));
     expect((error as DisplayError).code).toBe("display_failed");
-    expect((error as DisplayError).message).toMatch(/Too many casts/);
+    expect((error as DisplayError).message).toMatch(/Too many display requests/);
     expect((error as DisplayError).message).not.toMatch(/offline/);
     // Every connect attempt was refused; nothing was sent and the grant is kept.
     expect(relay.sockets).toHaveLength(3);
@@ -193,7 +193,7 @@ describe("displayDp1Playlist over relay v2", () => {
     expect((await readStoredDisplayGrant(testOrigin))?.ctr).toBe(0);
   });
 
-  it("refuses to cast with a session that is not the stored grant, leaving the newer grant alone", async () => {
+  it("refuses to send with a session that is not the stored grant, leaving the newer grant alone", async () => {
     const { grants } = await seeded();
     const relay = deviceOnRelay(grants);
     for (const stale of [{ ...session, ctl: "stale-ctl" }, { ...session, deviceId: "FF1-OTHER" }]) {

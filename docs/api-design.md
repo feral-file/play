@@ -420,7 +420,7 @@ indexes.
 
 The browser library is embedded by the NFT display website. Public APIs hide
 broker polling and E2EE details. From 0.4.0 the library creates the channel;
-there is no pairing input. From 0.5.0 it requests a display grant and casts
+there is no pairing input. From 0.5.0 it requests a display grant and sends
 over relay v2. (See `docs/integration.md` for the full public API.)
 
 Example TypeScript shape:
@@ -486,9 +486,9 @@ Required behavior:
   origin-scoped IndexedDB; fail with `storage_unavailable` without it. Replace
   a stored grant only once the new one has arrived, then self-revoke the old
   one with its old keys on a best-effort basis.
-- Cast by sealing `displayPlaylist` (the Play shape) under the grant's keys
+- Send by sealing `displayPlaylist` (the Play shape) under the grant's keys
   and sending it over relay v2 per the FF1 control protocol v1 §10: connect
-  per cast, fan out, ACK every frame, chunk over 32 KiB, pin the first reply
+  per request, fan out, ACK every frame, chunk over 32 KiB, pin the first reply
   that verifies against `profile.sig`, close. Never resend sealed bytes.
 - Never expose key material through logs, analytics, or thrown error text.
 - Send `requestedExpiresInSeconds` in the mint request only when the caller set it; the device decides the lifetime.
@@ -497,7 +497,7 @@ Required behavior:
 
 Requester library versions before 0.4.0 join a device-created channel from a
 QR payload or short code instead; the broker still serves that path. Versions
-before 0.5.0 send no `displayGrant`, receive a session, and cast through the
+before 0.5.0 send no `displayGrant`, receive a session, and send through the
 legacy `ff-relayer` `/api/cast`.
 
 ## Mint Library API

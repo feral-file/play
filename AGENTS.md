@@ -68,7 +68,7 @@ npm test
 2. Ephemeral browser session tokens are bearer credentials and must not be logged.
 3. Browser token storage is scoped to the current website origin.
 4. `ff-relayer` enforces session expiry and revocation.
-5. Browser sessions authorize only the intended display/cast path.
+5. Browser sessions authorize only the intended display path.
 6. Browser sessions do not grant API-key access or session-management access.
 7. Raw tokens are never stored where a hash or opaque handle is sufficient.
 8. Durable server state must not be replaced with process-local maps.

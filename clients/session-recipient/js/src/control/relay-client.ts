@@ -29,7 +29,7 @@ const FANOUT_GRACE_MS = 1000;
  * CONNECT_ATTEMPTS bounds reconnects before the first `hello`. §10 calls a
  * connect-time refusal (HTTP 429, close 1008) transient; a browser WebSocket
  * cannot tell it from a 404, so the attempts are bounded and the command is
- * reported undelivered (the next cast tries again).
+ * reported undelivered (the next request tries again).
  */
 const CONNECT_ATTEMPTS = 3;
 const BACKOFF_BASE_MS = 250;

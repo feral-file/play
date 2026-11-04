@@ -2,7 +2,7 @@
 
 ## Component
 
-`clients/session-recipient/js/` is the TypeScript token requester implementation for browser runtimes. It creates a pairing channel on the Mint Pairing Broker, shows the visitor the app link and six-digit code that bring their Art Computer to it, requests a display grant (FF1 control protocol v1 §5.7) from the Go token minter embedded in FF1 `feral-controld` once that minter joins, and casts to the FF1 over relay v2 with the grant's keys.
+`clients/session-recipient/js/` is the TypeScript token requester implementation for browser runtimes. It creates a pairing channel on the Mint Pairing Broker, shows the visitor the app link and six-digit code that bring their Art Computer to it, requests a display grant (FF1 control protocol v1 §5.7) from the Go token minter embedded in FF1 `feral-controld` once that minter joins, and sends to the FF1 over relay v2 with the grant's keys.
 
 ## Commands
 
@@ -25,6 +25,6 @@ npm run bundle
 - Render the pairing QR locally from the bundled `qrcode-generator`; no network fetch for pairing images.
 - `src/control/` is a port of the maintained ff-cli client (`src/utilities/relay-client.ts`, `src/utilities/control/{codec,jwk,strict-json}.ts`) onto WebCrypto and `btoa`/`atob`. Keep its closed-header and strict-JSON checks exactly; a check must never be relaxed into a `jose` option. When ff-cli changes, port the change rather than diverging.
 - `test/fixtures/ff1-control-v1` is vendored verbatim from ffos-user; do not edit it by hand. Re-vendor the directory and update `SOURCE.md` when ffos-user regenerates the fixtures (display-grant vectors arrive that way).
-- Connect to relay v2 per cast and close the socket right after; never hold an idle connection.
+- Connect to relay v2 per display request and close the socket right after; never hold an idle connection.
 - A public `unknown_controller`/`bad_envelope` from the channel is unverified: surface `device_unrecognized` and keep the grant; only the visitor's action clears it.
 - Keep TypeScript strict mode, `noUncheckedIndexedAccess`, and type-aware ESLint rules enabled.

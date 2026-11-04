@@ -42,8 +42,8 @@ never exports, that can do one thing — display a playlist — and that the own
 can revoke in the app. It is short-lived by default, or kept until the owner
 removes it when they choose that. The mint request and the returned grant
 travel end-to-end encrypted between the visitor's browser and their FF1, and
-every cast is a signed, encrypted envelope the FF1 verifies, so neither the
-broker nor the relay in the middle sees playlist content or can forge a cast. The broker does see what channel creation
+every display request is a signed, encrypted envelope the FF1 verifies, so neither the
+broker nor the relay in the middle sees playlist content or can forge a request. The broker does see what channel creation
 sends in the clear: your site's origin, the browser metadata you supply in
 `browserInfo`, and the pairing code it issues. Your origin is attested, not
 claimed: the broker takes it from the `Origin` header your visitor's browser
@@ -117,7 +117,7 @@ Useful options (see `DisplayOnArtComputerButtonOptions` in
 - `pairAgainLabel` — the button label after `device_unrecognized` (default
   "Pair again?"); the next click clears the grant and pairs again.
 - `socketFactory`, `castTimeoutMs` — a custom `WebSocket` opener and the
-  per-cast relay deadline, passed through to `displayDp1Playlist`.
+  per-request relay deadline, passed through to `displayDp1Playlist`.
 - `browserInfo` — `{ name, userAgent, label }` shown to the user in the
   mobile-app approval prompt. Set `label` to something the visitor will
   recognize, e.g. your site name.
@@ -183,7 +183,7 @@ await displayDp1Playlist({ session, playlist });
 - `displayDp1Playlist` owns the control envelope (sealing, the relay v2
   round trip, reply verification against the FF1's pinned profile). Website
   code never constructs envelopes or relay frames directly. It opens one relay
-  socket per cast and closes it right after.
+  socket per display request and closes it right after.
 - `unpairArtComputer()` sends a best-effort self-revoke to the FF1 with the
   stored keys, then deletes the grant. `clearStoredEphemeralBrowserSession(origin)`
   only deletes it (synchronously) and tells the FF1 nothing;
@@ -208,11 +208,11 @@ await displayDp1Playlist({ session, playlist });
 - A grant can only display a playlist: the FF1 refuses any other command from it.
   Expiry and revocation are enforced by the FF1 itself; the owner can remove
   the site in the app at any time, and the site can `unpairArtComputer()`.
-- On a cast the FF1 answers with a verified `access_revoked` or `expired`, or
+- On a display request the FF1 answers with a verified `access_revoked` or `expired`, or
   with the grant past its `expiresAt`, the library throws a `DisplayError` with
   code `session_rejected` and deletes the grant; the wrapped button then
   re-pairs on the next click. Custom integrations should prompt to pair again.
-- On a cast some channel peer answers with an unverified `unknown_controller`
+- On a display request some channel peer answers with an unverified `unknown_controller`
   or `bad_envelope` and nothing verified arrives, the library throws
   `device_unrecognized` and **keeps** the grant: anyone on the public channel
   can send that body. The wrapped button offers "Pair again?" and clears the
@@ -240,7 +240,7 @@ codes will not. `pairingErrorMessage(error)` maps them to user-facing text.
 | `device_unrecognized` | The FF1 answered that it does not know this grant, but unverified. The grant is kept; the wrapped button offers "Pair again?", custom integrations ask the visitor before clearing. |
 | `pairing_canceled` | User closed the pairing dialog, or your `signal` aborted. |
 | `display_rejected` | The FF1 verified the request and refused it (`permission_denied`, or the player failed). |
-| `display_failed` | This page's pairing was replaced by another tab's (reload and try again), the FF1 is offline (no peer on its relay channel), the relay refused the connection (its per-address cap: more than 6 tabs casting at once from one network answer "Too many casts at once…"), no verified reply arrived before the deadline, the relay dropped the connection after the send, or the FF1 reported a replayed request. Nothing is resent automatically: the visitor tries again. |
+| `display_failed` | This page's pairing was replaced by another tab's (reload and try again), the FF1 is offline (no peer on its relay channel), the relay refused the connection (its per-address cap: more than 6 tabs sending at once from one network answer "Too many display requests at once…"), no verified reply arrived before the deadline, the relay dropped the connection after the send, or the FF1 reported a replayed request. Nothing is resent automatically: the visitor tries again. |
 
 ## Network endpoints
 
@@ -249,7 +249,7 @@ The visitor's browser talks to two hosts. If your site sets a
 
 - the Mint Pairing Broker (`https://handoff.feralfile.com`) — channel
   creation, encrypted message send/poll, channel close
-- the relay v2 host — the cast, as a WebSocket
+- the relay v2 host — the display request, as a WebSocket
   (`wss://<relay host>/v2/channels/<deviceId>/connections`), so allow it with
   the `wss:` scheme. The FF1 names the host in the grant it issues
   (`relayV2Endpoint`), and the library uses only that; you have to write the
@@ -293,7 +293,7 @@ taking the breaking changes below. The `Play` names
 lists them. The default button label is "Display on Art Computer" and an
 error's `name` is `"DisplayError"`.
 
-0.5.0 casts only with a device-issued display grant over relay v2. It is a
+0.5.0 displays only with a device-issued display grant over relay v2. It is a
 breaking 0.x release:
 
 - `EphemeralBrowserSession` is `{ deviceId, ctl, expiresAt?, persistent }`;
@@ -307,7 +307,7 @@ breaking 0.x release:
   `readStoredEphemeralBrowserSession(origin)` are async and take only the
   origin, as does `clearStoredEphemeralBrowserSession(origin)`;
   `unpairArtComputer()` is new.
-- `DisplayDp1PlaylistOptions` loses `fetchImpl` (there is no HTTP cast) and
+- `DisplayDp1PlaylistOptions` loses `fetchImpl` (there is no HTTP request to the relay) and
   gains `socketFactory` (a custom `WebSocket` opener) and `timeoutMs`.
 - New error codes: `device_unsupported`, `device_unrecognized`,
   `storage_unavailable`, `too_many_sites`.
@@ -323,14 +323,14 @@ Which library works with which Art Computer:
 | FF OS without display grants | 0.4 | browser session, as before |
 | FF OS without display grants | 0.5 | `device_unsupported` (the device mints a session, which 0.5 discards; the row stays under Paired sites until it expires or is removed) |
 | FF OS with display grants | 0.4 | browser session, unchanged, until the legacy controller API is retired |
-| FF OS with display grants | 0.5 | display grant, cast over relay v2 |
-| FF OS with display grants, not yet secured (no owner), legacy controller API retired | 0.5 | existing grants keep casting; a new pairing ends in `approval_timeout` (the request is sent, but no app receives it; whichever of the library's `maxWaitMs` and the FF1's approval deadline passes first) until the owner secures the FF1 in the app |
+| FF OS with display grants | 0.5 | display grant, sent over relay v2 |
+| FF OS with display grants, not yet secured (no owner), legacy controller API retired | 0.5 | existing grants keep working; a new pairing ends in `approval_timeout` (the request is sent, but no app receives it; whichever of the library's `maxWaitMs` and the FF1's approval deadline passes first) until the owner secures the FF1 in the app |
 | any, legacy controller API retired | 0.4 | broken: upgrade to 0.5 first |
 
 Upgrade to 0.5 once Feral File announces that FF OS with display grants is
 broadly deployed; before that, visitors on older Art Computers get
 `device_unsupported`. One honest caveat while this is pre-1.0: expect API
-change between 0.x versions. A display grant authorizes the display/cast path
+change between 0.x versions. A display grant authorizes the display path
 only — that is by design, and the scope will stay narrow.
 
 Tell us what is unclear, impractical, or missing — open an issue on this repo.

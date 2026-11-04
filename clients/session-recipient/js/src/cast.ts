@@ -17,7 +17,7 @@ export type DisplayDp1PlaylistOptions = {
 
 const defaultTimeoutMs = 30_000;
 /** Shown as-is by the wrapped button: the one display_failed a visitor can act on by waiting. */
-export const tooManyCastsMessage = "Too many casts at once from this network, or the relay is unreachable. Try again in a moment.";
+export const tooManyCastsMessage = "Too many display requests at once from this network, or the relay is unreachable. Try again in a moment.";
 /** Shown as-is by the wrapped button: the page holds a pairing another tab has since replaced. */
 export const pairingReplacedMessage = "This page's pairing was replaced by a newer one. Reload the page and try again.";
 /** Bytes a request may carry before the relay's chunk pacing earns it more time. */
@@ -27,7 +27,7 @@ const revokeTimeoutMs = 10_000;
 /**
  * How far the counter jumps after a verified `replay` (§14.4). ff-cli resyncs
  * over the LAN instead; the browser has no LAN path, so it moves well past
- * whatever the FF1 has seen and the next cast seals fresh.
+ * whatever the FF1 has seen and the next request seals fresh.
  */
 const replayCounterJump = 1024;
 
@@ -168,8 +168,8 @@ export async function displayDp1Playlist(options: DisplayDp1PlaylistOptions): Pr
     await deleteStoredDisplayGrant(origin, record.ctl);
     throw new DisplayError("the display grant has expired", "session_rejected");
   }
-  // The page casts only with the pairing it obtained: a stale page must not
-  // cast to whatever FF1 another tab has paired with since, and the newer
+  // The page sends only with the pairing it obtained: a stale page must not
+  // send to whatever FF1 another tab has paired with since, and the newer
   // grant is left alone (not session_rejected, which would clear it).
   if (record.ctl !== options.session.ctl || record.deviceId !== options.session.deviceId) {
     throw new DisplayError(pairingReplacedMessage, "display_failed");
@@ -179,7 +179,7 @@ export async function displayDp1Playlist(options: DisplayDp1PlaylistOptions): Pr
     const reserved = await reserveCounter(origin, 1, record.ctl);
     if (reserved === undefined) {
       // Gone, or replaced by another tab's pairing: this grant is stale.
-      // The next display request re-reads the store and casts with the current one.
+      // The next display request re-reads the store and sends with the current one.
       throw new DisplayError("the display grant was replaced; try again", "display_failed");
     }
     return reserved.ctr;
@@ -192,7 +192,7 @@ export async function displayDp1Playlist(options: DisplayDp1PlaylistOptions): Pr
     if (outcome.error instanceof RelayConnectError) {
       // The relay refused or dropped the connection before hello. Browsers
       // see no status, and the usual cause is the relay's per-address cap
-      // (429 capacity / rate limited) when many tabs cast at once.
+      // (429 capacity / rate limited) when many tabs send at once.
       throw new DisplayError(tooManyCastsMessage, "display_failed");
     }
     if (outcome.error instanceof RelayUndeliveredError) {
@@ -250,7 +250,7 @@ export async function unpairArtComputer(options: { socketFactory?: SocketFactory
     return;
   }
   // The counter is reserved through the store while the record is still
-  // there, so a cast in another tab cannot reuse it.
+  // there, so a request in another tab cannot reuse it.
   const reserved = await reserveCounter(origin, 1, record.ctl);
   if (reserved !== undefined) {
     await revokeDisplayGrant(reserved, reserved.ctr, options.socketFactory);

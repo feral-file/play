@@ -32,7 +32,7 @@ export type BrowserInfo = {
 /**
  * The pairing this page holds with an Art Computer: a display grant the FF1
  * issued to keys that stay in this origin's IndexedDB. There is no token;
- * every cast is sealed with those keys.
+ * every display request is sealed with those keys.
  */
 export type EphemeralBrowserSession = {
   /** The FF1 that issued the grant (its `dev`). */
@@ -993,7 +993,7 @@ export async function requestEphemeralSession(options: RequestEphemeralSessionOp
       // tab may have paired meanwhile), so the right grant is revoked. Its
       // keys are only in memory now; revoke it on the device it came from
       // before they are dropped, unless it had already expired. Fire and
-      // forget: the cast that follows must not wait on an offline device.
+      // forget: the request that follows must not wait on an offline device.
       const previous = await replaceStoredDisplayGrant(record);
       if (previous !== undefined && !grantExpired(previous)) {
         void revokeDisplayGrant(previous, previous.ctr + 1, options.socketFactory);
