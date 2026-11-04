@@ -7,7 +7,7 @@ Integration coverage exercises the site-initiated mint pairing flow described in
 ## Commands
 
 ```sh
-# The file: dependency on @feralfile/play resolves to its dist/ output,
+# The file: dependency on @feralfile/display resolves to its dist/ output,
 # so build the library first.
 (cd ../clients/session-recipient/js && npm ci && npm run build)
 npm ci

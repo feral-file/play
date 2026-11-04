@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { displayDp1Playlist, unpairArtComputer } from "../src/cast.js";
-import type { PlayError } from "../src/errors.js";
+import type { DisplayError } from "../src/errors.js";
 import { readStoredDisplayGrant, replaceStoredDisplayGrant } from "../src/grantStore.js";
 import type { Jwk } from "./control-device.js";
 import { captureError } from "./fakeBroker.js";
@@ -87,7 +87,7 @@ describe("displayDp1Playlist over relay v2", () => {
     const { grants } = await seeded();
     const relay = deviceOnRelay(grants, () => answer);
     const error = await captureError(displayDp1Playlist({ session, playlist, socketFactory: relay.socketFactory }));
-    expect((error as PlayError).code).toBe("display_rejected");
+    expect((error as DisplayError).code).toBe("display_rejected");
     expect(await readStoredDisplayGrant(testOrigin)).toBeDefined();
   });
 
@@ -95,7 +95,7 @@ describe("displayDp1Playlist over relay v2", () => {
     const { grants } = await seeded();
     const relay = deviceOnRelay(grants, () => ({ ok: false, code }));
     const error = await captureError(displayDp1Playlist({ session, playlist, socketFactory: relay.socketFactory }));
-    expect((error as PlayError).code).toBe("session_rejected");
+    expect((error as DisplayError).code).toBe("session_rejected");
     expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
   });
 
@@ -103,7 +103,7 @@ describe("displayDp1Playlist over relay v2", () => {
     const { grants } = await seeded();
     const relay = deviceOnRelay(grants, () => ({ ok: false, code: "replay" }));
     const error = await captureError(displayDp1Playlist({ session, playlist, socketFactory: relay.socketFactory }));
-    expect((error as PlayError).code).toBe("display_failed");
+    expect((error as DisplayError).code).toBe("display_failed");
     expect(relay.ff1.seen).toHaveLength(1);
     expect((await readStoredDisplayGrant(testOrigin))?.ctr).toBe(1 + 1024);
   });
@@ -112,7 +112,7 @@ describe("displayDp1Playlist over relay v2", () => {
     const { grants } = await seeded();
     const relay = deviceOnRelay(grants, () => ({ ok: false, code }));
     const error = await captureError(displayDp1Playlist({ session, playlist, socketFactory: relay.socketFactory }));
-    expect((error as PlayError).code).toBe("display_failed");
+    expect((error as DisplayError).code).toBe("display_failed");
   });
 
   it.each(["unknown_controller", "bad_envelope"])("maps an unverified public %s with no verified reply to device_unrecognized and keeps the grant", async (code) => {
@@ -121,7 +121,7 @@ describe("displayDp1Playlist over relay v2", () => {
     // verify the body, so the grant is kept and the visitor decides.
     const relay = fakeRelay({ peers: [{ id: "conn_ff1", respond: () => ({ error: { code } }) }] });
     const error = await captureError(displayDp1Playlist({ session, playlist, socketFactory: relay.socketFactory, timeoutMs: 300 }));
-    expect((error as PlayError).code).toBe("device_unrecognized");
+    expect((error as DisplayError).code).toBe("device_unrecognized");
     expect(await readStoredDisplayGrant(testOrigin)).toBeDefined();
   });
 
@@ -129,7 +129,7 @@ describe("displayDp1Playlist over relay v2", () => {
     await seeded();
     const relay = fakeRelay({ peers: [{ id: "conn_ff1" }] });
     const error = await captureError(displayDp1Playlist({ session, playlist, socketFactory: relay.socketFactory, timeoutMs: 300 }));
-    expect((error as PlayError).code).toBe("display_failed");
+    expect((error as DisplayError).code).toBe("display_failed");
     expect(await readStoredDisplayGrant(testOrigin)).toBeDefined();
   });
 
@@ -137,8 +137,8 @@ describe("displayDp1Playlist over relay v2", () => {
     await seeded();
     const relay = fakeRelay({ peers: [] });
     const error = await captureError(displayDp1Playlist({ session, playlist, socketFactory: relay.socketFactory }));
-    expect((error as PlayError).code).toBe("display_failed");
-    expect((error as PlayError).message).toMatch(/offline/);
+    expect((error as DisplayError).code).toBe("display_failed");
+    expect((error as DisplayError).message).toMatch(/offline/);
     expect(await readStoredDisplayGrant(testOrigin)).toBeDefined();
   });
 
@@ -146,9 +146,9 @@ describe("displayDp1Playlist over relay v2", () => {
     await seeded();
     const relay = fakeRelay({ peers: [{ id: "conn_ff1" }], failConnect: 1006 });
     const error = await captureError(displayDp1Playlist({ session, playlist, socketFactory: relay.socketFactory }));
-    expect((error as PlayError).code).toBe("display_failed");
-    expect((error as PlayError).message).toMatch(/Too many casts/);
-    expect((error as PlayError).message).not.toMatch(/offline/);
+    expect((error as DisplayError).code).toBe("display_failed");
+    expect((error as DisplayError).message).toMatch(/Too many casts/);
+    expect((error as DisplayError).message).not.toMatch(/offline/);
     // Every connect attempt was refused; nothing was sent and the grant is kept.
     expect(relay.sockets).toHaveLength(3);
     expect(relay.frames).toHaveLength(0);
@@ -173,7 +173,7 @@ describe("displayDp1Playlist over relay v2", () => {
       return created;
     };
     const error = await captureError(displayDp1Playlist({ session, playlist, socketFactory }));
-    expect((error as PlayError).code).toBe("display_failed");
+    expect((error as DisplayError).code).toBe("display_failed");
     expect(relay.frames).toHaveLength(1);
     expect(relay.sockets).toHaveLength(1);
   });
@@ -188,7 +188,7 @@ describe("displayDp1Playlist over relay v2", () => {
       return relay.socketFactory(url);
     };
     const error = await captureError(displayDp1Playlist({ session, playlist, socketFactory }));
-    expect((error as PlayError).code).toBe("display_failed");
+    expect((error as DisplayError).code).toBe("display_failed");
     expect(relay.ff1.seen).toHaveLength(0);
     expect((await readStoredDisplayGrant(testOrigin))?.ctr).toBe(0);
   });
@@ -198,8 +198,8 @@ describe("displayDp1Playlist over relay v2", () => {
     const relay = deviceOnRelay(grants);
     for (const stale of [{ ...session, ctl: "stale-ctl" }, { ...session, deviceId: "FF1-OTHER" }]) {
       const error = await captureError(displayDp1Playlist({ session: stale, playlist, socketFactory: relay.socketFactory }));
-      expect((error as PlayError).code).toBe("display_failed");
-      expect((error as PlayError).message).toMatch(/replaced/);
+      expect((error as DisplayError).code).toBe("display_failed");
+      expect((error as DisplayError).message).toMatch(/replaced/);
     }
     expect(relay.sockets).toHaveLength(0);
     expect((await readStoredDisplayGrant(testOrigin))?.ctr).toBe(0);
@@ -208,7 +208,7 @@ describe("displayDp1Playlist over relay v2", () => {
   it("throws session_rejected without a stored grant", async () => {
     const relay = fakeRelay({ peers: [] });
     const error = await captureError(displayDp1Playlist({ session, playlist, socketFactory: relay.socketFactory }));
-    expect((error as PlayError).code).toBe("session_rejected");
+    expect((error as DisplayError).code).toBe("session_rejected");
     expect(relay.sockets).toHaveLength(0);
   });
 
@@ -216,7 +216,7 @@ describe("displayDp1Playlist over relay v2", () => {
     await seedGrant(testOrigin, { expiresAt: "2000-01-01T00:00:00.000Z", persistent: false });
     const relay = fakeRelay({ peers: [] });
     const error = await captureError(displayDp1Playlist({ session, playlist, socketFactory: relay.socketFactory }));
-    expect((error as PlayError).code).toBe("session_rejected");
+    expect((error as DisplayError).code).toBe("session_rejected");
     expect(relay.sockets).toHaveLength(0);
     expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
   });

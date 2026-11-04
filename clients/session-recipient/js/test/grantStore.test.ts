@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { requestEphemeralSession } from "../src/client.js";
-import { PlayError } from "../src/errors.js";
+import { DisplayError } from "../src/errors.js";
 import { deleteStoredDisplayGrant, readStoredDisplayGrant, replaceStoredDisplayGrant, reserveCounter } from "../src/grantStore.js";
 import { brokerBaseUrl, fakeBroker } from "./fakeBroker.js";
 import { removeIndexedDb, resetIndexedDb, seedGrant } from "./grants.js";
@@ -84,7 +84,7 @@ describe("display grant store", () => {
   it("fails pairing with storage_unavailable when storage is disabled", async () => {
     const broker = await fakeBroker();
     const error = await requestEphemeralSession({ brokerBaseUrl, storage: false, fetchImpl: broker.fetchImpl }).catch((reason: unknown) => reason);
-    expect(error).toBeInstanceOf(PlayError);
-    expect((error as PlayError).code).toBe("storage_unavailable");
+    expect(error).toBeInstanceOf(DisplayError);
+    expect((error as DisplayError).code).toBe("storage_unavailable");
   });
 });

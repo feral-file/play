@@ -10,7 +10,7 @@ import {
   type RequestEphemeralSessionOptions
 } from "../src/client.js";
 import { base64UrlDecode, decryptChannelMessage, generateBrowserKeyPair } from "../src/crypto.js";
-import { PlayError } from "../src/errors.js";
+import { DisplayError } from "../src/errors.js";
 import { readStoredDisplayGrant, replaceStoredDisplayGrant } from "../src/grantStore.js";
 import { fakeRelay } from "./fakeRelay.js";
 import type { PairingMaterial } from "../src/pairingPayload.js";
@@ -305,8 +305,8 @@ describe("requestEphemeralSession", () => {
     const error = await captureError(requestEphemeralSession(baseOptions(broker.fetchImpl, {
       onPairingMaterial: (material) => materials.push(material)
     })));
-    expect(error).toBeInstanceOf(PlayError);
-    expect((error as PlayError).code).toBe("pairing_code_expired");
+    expect(error).toBeInstanceOf(DisplayError);
+    expect((error as DisplayError).code).toBe("pairing_code_expired");
     expectNoSecrets(error);
     expect(materials).toHaveLength(1);
     expect(broker.closed).toEqual(["ch_1"]);
@@ -323,7 +323,7 @@ describe("requestEphemeralSession", () => {
         skewMs = 16_000;
       }
     })));
-    expect((error as PlayError).code).toBe("pairing_code_expired");
+    expect((error as DisplayError).code).toBe("pairing_code_expired");
     expect(broker.closed).toEqual(["ch_1"]);
   });
 
@@ -379,7 +379,7 @@ describe("requestEphemeralSession", () => {
         skewMs = 16_000;
       }
     })));
-    expect((error as PlayError).code).toBe("pairing_code_expired");
+    expect((error as DisplayError).code).toBe("pairing_code_expired");
     // One last look at the broker before giving the channel up.
     const polls = broker.requests.filter((request) => request.url.includes("/messages?"));
     expect(polls.length).toBeGreaterThanOrEqual(1);
@@ -412,7 +412,7 @@ describe("requestEphemeralSession", () => {
       channelRegenerations: 2,
       onPairingMaterial: (material) => materials.push(material)
     })));
-    expect((error as PlayError).code).toBe("approval_timeout");
+    expect((error as DisplayError).code).toBe("approval_timeout");
     expectNoSecrets(error);
     expect(materials).toHaveLength(3);
     expect(broker.closed).toEqual(["ch_1", "ch_2", "ch_3"]);
@@ -435,7 +435,7 @@ describe("requestEphemeralSession", () => {
         }, 20);
       }
     })));
-    expect((error as PlayError).code).toBe("pairing_canceled");
+    expect((error as DisplayError).code).toBe("pairing_canceled");
     expectNoSecrets(error);
     expect(broker.closed).toEqual(["ch_1"]);
     expect(broker.mintRequests).toEqual([]);
@@ -459,14 +459,14 @@ describe("requestEphemeralSession", () => {
       signal: controller.signal,
       onPairingMaterial: (material) => materials.push(material)
     })));
-    expect((error as PlayError).code).toBe("pairing_canceled");
+    expect((error as DisplayError).code).toBe("pairing_canceled");
     expect(materials).toEqual([]);
     expect(broker.closed).toEqual(["ch_1"]);
   });
 
   it("maps a declined approval to mint_rejected without storing", async () => {
     const error = await captureError(runMintFlow({ result: { type: "mint_rejected" } }));
-    expect((error as PlayError).code).toBe("mint_rejected");
+    expect((error as DisplayError).code).toBe("mint_rejected");
     expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
   });
 
@@ -478,14 +478,14 @@ describe("requestEphemeralSession", () => {
     { reason: "something_new", code: "mint_rejected" }
   ])("maps a mint_rejected reason $reason to $code", async ({ reason, code }) => {
     const error = await captureError(runMintFlow({ result: { type: "mint_rejected", reason } }));
-    expect((error as PlayError).code).toBe(code);
+    expect((error as DisplayError).code).toBe(code);
     expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
   });
 
   it("throws device_unsupported for a mint_succeeded without a displayGrant and discards the session", async () => {
     // Firmware without display grants ignores the keys and mints a session.
     const error = await captureError(runMintFlow({ result: { type: "mint_succeeded", legacySession: true } }));
-    expect((error as PlayError).code).toBe("device_unsupported");
+    expect((error as DisplayError).code).toBe("device_unsupported");
     expectNoSecrets(error);
     expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
     expect(globalThis.localStorage).toBeUndefined();
@@ -634,7 +634,7 @@ describe("requestEphemeralSession", () => {
         }, 20);
       }
     })));
-    expect((error as PlayError).code).toBe("pairing_canceled");
+    expect((error as DisplayError).code).toBe("pairing_canceled");
     expect(fetchImpl.mock.calls.some(([, init]) => init?.method === "DELETE")).toBe(true);
   });
 
@@ -672,7 +672,7 @@ describe("requestEphemeralSession", () => {
     }
     vi.useRealTimers();
     const error = await pending;
-    expect((error as PlayError).code).toBe("pairing_code_expired");
+    expect((error as DisplayError).code).toBe("pairing_code_expired");
     // Two polls: the one cut off at the deadline, then the bounded final check.
     expect(fetchImpl.mock.calls.filter(([, init]) => (init?.method ?? "GET") === "GET")).toHaveLength(2);
   });
@@ -690,7 +690,7 @@ describe("requestEphemeralSession", () => {
       return broker.fetchImpl(input, init);
     });
     const error = await captureError(requestEphemeralSession(baseOptions(fetchImpl, { maxWaitMs: 30 })));
-    expect((error as PlayError).code).toBe("approval_timeout");
+    expect((error as DisplayError).code).toBe("approval_timeout");
     expect(broker.channels).toHaveLength(1);
   });
 
@@ -707,7 +707,7 @@ describe("requestEphemeralSession", () => {
       return broker.fetchImpl(input, init);
     });
     const error = await captureError(requestEphemeralSession(baseOptions(fetchImpl, { maxWaitMs: 30 })));
-    expect((error as PlayError).code).toBe("approval_timeout");
+    expect((error as DisplayError).code).toBe("approval_timeout");
     expectNoSecrets(error);
   });
 
@@ -720,7 +720,7 @@ describe("requestEphemeralSession", () => {
       return broker.fetchImpl(input, init);
     });
     const error = await captureError(requestEphemeralSession(baseOptions(fetchImpl)));
-    expect((error as PlayError).code).toBe("pairing_code_expired");
+    expect((error as DisplayError).code).toBe("pairing_code_expired");
     expectNoSecrets(error);
     expect(broker.closed).toEqual(["ch_1"]);
   });
@@ -774,7 +774,7 @@ describe("requestEphemeralSession", () => {
       return realEncrypt(...args);
     });
     const error = await captureError(requestEphemeralSession(baseOptions(broker.fetchImpl, { signal: controller.signal })));
-    expect((error as PlayError).code).toBe("pairing_canceled");
+    expect((error as DisplayError).code).toBe("pairing_canceled");
     expect(broker.fetchImpl.mock.calls.some(([input, init]) => init?.method === "POST" && requestUrl(input).endsWith("/messages"))).toBe(false);
     expect(broker.mintRequests).toEqual([]);
   });
@@ -790,7 +790,7 @@ describe("requestEphemeralSession", () => {
       return response;
     });
     const error = await captureError(requestEphemeralSession(baseOptions(fetchImpl, { signal: controller.signal })));
-    expect((error as PlayError).code).toBe("pairing_canceled");
+    expect((error as DisplayError).code).toBe("pairing_canceled");
     expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
   });
 
@@ -869,7 +869,7 @@ describe("requestEphemeralSession", () => {
 
     const error = await captureError(requestEphemeralSession(baseOptions(broker.fetchImpl, { socketFactory: relay.socketFactory })));
 
-    expect((error as PlayError).code).toBe("mint_rejected");
+    expect((error as DisplayError).code).toBe("mint_rejected");
     expect((await readStoredDisplayGrant(testOrigin))?.ctl).toBe(old.ctl);
     expect(relay.sockets).toHaveLength(0);
   });

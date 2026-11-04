@@ -4,7 +4,7 @@
  * `error.code` is the contract: match on it, not on message text. Messages
  * stay human-readable and may change between versions; codes do not.
  */
-export type PlayErrorCode =
+export type DisplayErrorCode =
   | "pairing_code_expired"
   | "mint_rejected"
   | "approval_timeout"
@@ -21,12 +21,24 @@ export type PlayErrorCode =
   /** The FF1 holds as many paired sites as it allows; the owner removes one first. */
   | "too_many_sites";
 
-export class PlayError extends Error {
-  readonly code: PlayErrorCode | undefined;
+export class DisplayError extends Error {
+  readonly code: DisplayErrorCode | undefined;
 
-  constructor(message: string, code?: PlayErrorCode) {
+  constructor(message: string, code?: DisplayErrorCode) {
     super(message);
-    this.name = "PlayError";
+    this.name = "DisplayError";
     this.code = code;
   }
 }
+
+/** @deprecated Renamed to `DisplayErrorCode` with the move from `@feralfile/play`; removed in 0.6.0. */
+export type PlayErrorCode = DisplayErrorCode;
+
+/**
+ * @deprecated Renamed to `DisplayError` with the move from `@feralfile/play`;
+ * removed in 0.6.0. It is the same class, so
+ * `error instanceof PlayError` still matches every error the library throws.
+ */
+export const PlayError = DisplayError;
+/** @deprecated Renamed to `DisplayError`; removed in 0.6.0. */
+export type PlayError = DisplayError;

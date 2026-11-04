@@ -1,6 +1,6 @@
 import type { DeviceProfile } from "./control/codec.js";
 import { thumbprint, type PublicJwk } from "./control/jwk.js";
-import { PlayError } from "./errors.js";
+import { DisplayError } from "./errors.js";
 
 /**
  * The display grant stored for one site origin: the grant the FF1 issued,
@@ -34,8 +34,8 @@ type OptionalIndexedDbGlobals = {
   indexedDB?: IDBFactory;
 };
 
-function storageUnavailable(): PlayError {
-  return new PlayError("IndexedDB is unavailable; display grants cannot be stored", "storage_unavailable");
+function storageUnavailable(): DisplayError {
+  return new DisplayError("IndexedDB is unavailable; display grants cannot be stored", "storage_unavailable");
 }
 
 export function hasIndexedDb(): boolean {
@@ -115,7 +115,7 @@ async function checkedGrant(value: unknown): Promise<StoredDisplayGrant | undefi
     return undefined;
   }
   if ((await thumbprint(value.sigPublic)) !== value.ctl) {
-    throw new PlayError("stored display grant ctl does not match its signing key", "display_failed");
+    throw new DisplayError("stored display grant ctl does not match its signing key", "display_failed");
   }
   return value;
 }

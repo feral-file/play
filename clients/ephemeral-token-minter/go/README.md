@@ -19,7 +19,7 @@ The joined channel's `PollMintRequest`, `SendMintSuccess`, `SendMintRejection` a
 
 ## Display grants
 
-A requester from `@feralfile/play` 0.5.0 sends `displayGrant: {"v":1,"sig":<JWK>,"enc":<JWK>}` in both its create-call request and its encrypted `mint_request`. `MintRequest.DisplayGrant` carries that member raw (nil when absent) from `PollMintRequest` and from `JoinedMintRequest`; it is never validated there, so a malformed one never fails a poll or a join. `ParseDisplayGrantKeys` validates it when the host decides whether to issue a grant: each key must be a P-256 public EC JWK with exactly `kty`, `crv`, `x` and `y` on the curve, and every failure wraps `ErrInvalidDisplayGrant`.
+A requester from `@feralfile/display` 0.5.0 sends `displayGrant: {"v":1,"sig":<JWK>,"enc":<JWK>}` in both its create-call request and its encrypted `mint_request`. `MintRequest.DisplayGrant` carries that member raw (nil when absent) from `PollMintRequest` and from `JoinedMintRequest`; it is never validated there, so a malformed one never fails a poll or a join. `ParseDisplayGrantKeys` validates it when the host decides whether to issue a grant: each key must be a P-256 public EC JWK with exactly `kty`, `crv`, `x` and `y` on the curve, and every failure wraps `ErrInvalidDisplayGrant`.
 
 `SendMintSuccessResult(ctx, request, MintSuccess{Session, DisplayGrant})` sends a session, a display grant (`DisplayGrantResult`, the payload's top-level `displayGrant`), or both; a grant may only answer a request that sent `displayGrant`. `SendMintSuccess(ctx, request, MintResult)` is unchanged and sends the same bytes as before. `MintResult` JSON never carries a grant.
 

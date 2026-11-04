@@ -1,20 +1,20 @@
-# @feralfile/play
+# @feralfile/display
 
-`clients/session-recipient/js/` is `@feralfile/play`, the browser library websites embed to pair a visitor's browser with their Art Computer and play a DP-1 playlist on it. Internally it is the mint-pairing requester: the browser client that asks the Go token minter embedded in FF1 `feral-controld` for a **display grant**, a display-only controller record of the FF1 control protocol (ffos-user `docs/ff1-control-v1.md` §5.7), and then casts to the FF1 over relay v2 with the keys that grant was issued to.
+`clients/session-recipient/js/` is `@feralfile/display`, the browser library websites embed to pair a visitor's browser with their Art Computer and display a DP-1 playlist on it. It was published as `@feralfile/play` through 0.4.0; see [Renamed from @feralfile/play](#renamed-from-feralfileplay). Internally it is the mint-pairing requester: the browser client that asks the Go token minter embedded in FF1 `feral-controld` for a **display grant**, a display-only controller record of the FF1 control protocol (ffos-user `docs/ff1-control-v1.md` §5.7), and then casts to the FF1 over relay v2 with the keys that grant was issued to.
 
 ```sh
-npm i @feralfile/play
+npm i @feralfile/display
 ```
 
 The published package ships compiled ESM + type declarations from `dist/` (`npm run build`). Source stays TypeScript-first in `src/`.
 
-Browser runtimes check IndexedDB (database `ff-play`, store `displayGrants`, keyed by the current website origin) for an existing display grant. If one is missing or expired, `requestEphemeralSession` generates fresh non-extractable P-256 keys, creates a Mint Pairing Broker channel as the browser (`creatorRole: "browser"`, with the origin from `window.location.origin`, which the broker checks against the `Origin` header the browser sets), hands the visitor the app link `https://link.feralfile.com/pair?channel=<id>&token=<pairingToken>` and a six-digit code through `onPairingMaterial`, and polls until the visitor's Art Computer joins the channel. It then sends an end-to-end encrypted `mint_request` carrying the public keys to the joined device's key, polls for the encrypted result, validates the channel binding, stores the grant with its keys and request counter as one IndexedDB record, and returns the pairing metadata. `displayDp1Playlist` seals a `displayPlaylist` command under those keys and sends it over relay v2 (`wss://<relayV2Endpoint>/v2/channels/<deviceId>/connections`), opening a socket per cast and closing it right after, without exposing the envelope to website code. See [Sequential Flow](../../../docs/sequential-flow.md) for the end-to-end model.
+Browser runtimes check IndexedDB (database `ff-play`, a name kept so stored grants survive the rename; store `displayGrants`, keyed by the current website origin) for an existing display grant. If one is missing or expired, `requestEphemeralSession` generates fresh non-extractable P-256 keys, creates a Mint Pairing Broker channel as the browser (`creatorRole: "browser"`, with the origin from `window.location.origin`, which the broker checks against the `Origin` header the browser sets), hands the visitor the app link `https://link.feralfile.com/pair?channel=<id>&token=<pairingToken>` and a six-digit code through `onPairingMaterial`, and polls until the visitor's Art Computer joins the channel. It then sends an end-to-end encrypted `mint_request` carrying the public keys to the joined device's key, polls for the encrypted result, validates the channel binding, stores the grant with its keys and request counter as one IndexedDB record, and returns the pairing metadata. `displayDp1Playlist` seals a `displayPlaylist` command under those keys and sends it over relay v2 (`wss://<relayV2Endpoint>/v2/channels/<deviceId>/connections`), opening a socket per cast and closing it right after, without exposing the envelope to website code. See [Sequential Flow](../../../docs/sequential-flow.md) for the end-to-end model.
 
 ```ts
 import {
   displayDp1Playlist,
   requestEphemeralSession
-} from "@feralfile/play";
+} from "@feralfile/display";
 
 const session = await requestEphemeralSession({
   brokerBaseUrl: "https://handoff.feralfile.com",
@@ -28,16 +28,16 @@ await displayDp1Playlist({ session, playlist: dp1Playlist });
 
 ## Wrapped Pairing UI
 
-For a standard integration, mount the provided **Play on Art Computer** button.
+For a standard integration, mount the provided **Display on Art Computer** button.
 It checks the origin's grant store first, opens the pairing dialog only when
 there is no valid grant, waits for the Art Computer to join and the owner to
 approve in the app, and then sends the DP1 playlist to the FF1 over relay v2.
 
 ```ts
-import { mountPlayOnArtComputerButton } from "@feralfile/play";
+import { mountDisplayOnArtComputerButton } from "@feralfile/display";
 
-mountPlayOnArtComputerButton({
-  container: "#play-on-art-computer",
+mountDisplayOnArtComputerButton({
+  container: "#display-on-art-computer",
   playlist: dp1Playlist,
   brokerBaseUrl: "https://handoff.feralfile.com",
   // Optional; this is the default.
@@ -59,7 +59,7 @@ page with the bundled `qrcode-generator` (no image request), captioned "Scan
 with your phone camera or the Feral File app", with the code below. A status
 line reads "Waiting for your Art Computer…" and then "Approve in the Feral
 File app…". If the channel expires before an Art Computer joins, the dialog
-shows fresh material, up to twice, and then the play fails with
+shows fresh material, up to twice, and then the button fails with
 `approval_timeout`.
 
 When the FF1 answers a cast with an unverified `unknown_controller` or
@@ -74,7 +74,34 @@ layout overrides so a website can keep its own styling while preserving the
 pairing sequence and approval handoff; `createDialog` replaces it with any
 implementation of `PairingDialog` (`{ show, setStatus, close }`).
 
-Upgrading from 0.4.x: 0.5.0 is a breaking release. The library casts only with
+## Renamed from @feralfile/play
+
+The verb for putting art on a display is display, not play, so the package is
+`@feralfile/display` from 0.5.0 and the button reads **Display on Art
+Computer**. `@feralfile/play` stops at 0.4.0. To move, change the dependency
+and the import specifier, then follow [Upgrading from 0.4.x](#upgrading-from-04x).
+The old names keep working in 0.5.x as deprecated aliases and go in 0.6.0:
+
+| Deprecated (0.5.x) | Use |
+| :-- | :-- |
+| `mountPlayOnArtComputerButton` | `mountDisplayOnArtComputerButton` |
+| `PlayOnArtComputerButtonOptions` | `DisplayOnArtComputerButtonOptions` |
+| `PlayOnArtComputerButtonHandle` | `DisplayOnArtComputerButtonHandle` |
+| `PlayError` | `DisplayError` (the same class: `instanceof PlayError` still matches) |
+| `PlayErrorCode` | `DisplayErrorCode` |
+| CSS classes `ff-ac-play`, `ff-ac-play-button`, `ff-ac-play-status` | `ff-ac-display`, `ff-ac-display-button`, `ff-ac-display-status` (the button carries both; the default styles use only the new ones) |
+
+What reads differently: the default button label is "Display on Art
+Computer", the dialog title "Display on your Art Computer", the messages that
+told the visitor to press play now say try again, and an error's `name` is
+`"DisplayError"`. `buttonLabel` and `dialog.copy` overrides work as before, and
+error codes are unchanged. The IndexedDB database keeps the name `ff-play`. The
+self-hosted bundle is `display.js`; 0.5.x releases also attach it as
+`play.js`.
+
+## Upgrading from 0.4.x
+
+0.5.0 is a breaking release. The library casts only with
 a device-issued display grant over relay v2; there is no relayer token, no
 `/api/cast` and no `relayerBaseUrl`. `EphemeralBrowserSession` is now
 `{ deviceId, ctl, expiresAt?, persistent }`, the grant lives in IndexedDB
@@ -109,6 +136,6 @@ envelope with the fixture device keys.
 
 - Keep a grant's private keys non-extractable and only in origin-scoped IndexedDB, together with the grant and its request counter.
 - Do not expose key material or the pairing token through logs, thrown errors, analytics, or public callbacks. The one exception is the channel's pairing token inside the app link, which `onPairingMaterial` hands over because the visitor has to open or scan it; it is single-use and dies with the channel.
-- A grant seals only `displayPlaylist` in the Play shape and its own `revokeController`; the FF1 refuses everything else with `permission_denied`.
+- A grant seals only `displayPlaylist` in the Play shape (the FF1 control protocol's name for that command form) and its own `revokeController`; the FF1 refuses everything else with `permission_denied`.
 - Connect to relay v2 per cast and close at once; never hold an idle socket.
 - Keep API names requester-oriented rather than tied to a specific website.

@@ -1,8 +1,8 @@
 # Integration Guide
 
-This guide adds a **Play on Art Computer** action to your product: someone
-selects works, presses play, and the works appear on their Feral File Art
-Computer (FF1). It is for any product where people encounter art — a
+This guide adds a **Display on Art Computer** action to your product: someone
+selects works, presses the button, and the works appear on their Feral File
+Art Computer (FF1). It is for any product where people encounter art — a
 marketplace, an artist's site, a gallery app, an agent. You embed a browser
 library; everything else — pairing, approval, encryption, device delivery — is
 handled by Feral File infrastructure.
@@ -14,7 +14,7 @@ implement the same flow directly against the documented protocol
 
 What the visitor experiences:
 
-1. They press **Play on Art Computer** on your site.
+1. They press **Display on Art Computer** on your site.
 2. First time only, a pairing dialog opens:
    - **On a phone or tablet**, it shows **Open the Feral File app**. They tap it, the app
      opens with the request, and they tap **Accept**. Below the button is a
@@ -27,8 +27,8 @@ What the visitor experiences:
    The dialog reads "Waiting for your Art Computer…" until the Art Computer
    joins, then "Approve in the Feral File app…". A code lasts five minutes;
    if it runs out, the dialog shows a fresh one, up to twice.
-3. The playlist plays on their Art Computer. Subsequent plays from your site
-   skip pairing entirely — the display grant is remembered per site origin
+3. The works are on display on their Art Computer. After that, your site
+   skips pairing entirely — the display grant is remembered per site origin
    until it expires or is removed.
 
 The visitor never opens a settings page on the Art Computer or carries a code
@@ -38,12 +38,12 @@ authority accepts it.
 Your site never receives device API keys or account credentials. The FF1
 issues the visitor's browser a **display grant**: a display-only controller
 record of the FF1 control protocol, bound to keys the browser generates and
-never exports, that can do one thing — play a playlist — and that the owner
+never exports, that can do one thing — display a playlist — and that the owner
 can revoke in the app. It is short-lived by default, or kept until the owner
 removes it when they choose that. The mint request and the returned grant
 travel end-to-end encrypted between the visitor's browser and their FF1, and
 every cast is a signed, encrypted envelope the FF1 verifies, so neither the
-broker nor the relay in the middle sees playlist content or can forge a play. The broker does see what channel creation
+broker nor the relay in the middle sees playlist content or can forge a cast. The broker does see what channel creation
 sends in the clear: your site's origin, the browser metadata you supply in
 `browserInfo`, and the pairing code it issues. Your origin is attested, not
 claimed: the broker takes it from the `Origin` header your visitor's browser
@@ -52,14 +52,14 @@ full model is in [Sequential Flow](sequential-flow.md).
 
 ## What you need
 
-- The requester library: [`@feralfile/play`](https://www.npmjs.com/package/@feralfile/play)
-  (`npm i @feralfile/play`), source in this repo at
+- The requester library: [`@feralfile/display`](https://www.npmjs.com/package/@feralfile/display)
+  (`npm i @feralfile/display`), source in this repo at
   [`clients/session-recipient/js`](../clients/session-recipient/js). For a
-  site with no build step, download `play.js` from the
+  site with no build step, download `display.js` from the
   [latest release](https://github.com/feral-file/play/releases/latest) — a
   self-contained ESM bundle — host it next to your pages, and
-  `import { mountPlayOnArtComputerButton } from "./play.js"`. A CDN import
-  (`https://esm.sh/@feralfile/play`) also works for quick experiments, but
+  `import { mountDisplayOnArtComputerButton } from "./display.js"`. A CDN import
+  (`https://esm.sh/@feralfile/display`) also works for quick experiments, but
   self-hosting keeps your integration free of infrastructure that neither of
   us operates.
 - A [DP-1](https://github.com/display-protocol/dp1) playlist document for the
@@ -77,10 +77,10 @@ browser; a private window that blocks site data fails with
 ## Quickest path: mount the button
 
 ```ts
-import { mountPlayOnArtComputerButton } from "@feralfile/play";
+import { mountDisplayOnArtComputerButton } from "@feralfile/display";
 
-mountPlayOnArtComputerButton({
-  container: "#play-on-art-computer",
+mountDisplayOnArtComputerButton({
+  container: "#display-on-art-computer",
   playlist: () => buildDp1PlaylistFromSelection(),
   brokerBaseUrl: "https://handoff.feralfile.com"
 });
@@ -97,7 +97,7 @@ it to the FF1 over relay v2.
 function, so you can build the DP-1 document at click time from the visitor's
 current selection.
 
-Useful options (see `PlayOnArtComputerButtonOptions` in
+Useful options (see `DisplayOnArtComputerButtonOptions` in
 [`ui.ts`](../clients/session-recipient/js/src/ui.ts) for the full set):
 
 - `buttonLabel`, `busyLabel`, `className`, `statusClassName` — restyle the
@@ -140,7 +140,7 @@ import {
   hasStoredEphemeralBrowserSession,
   clearStoredEphemeralBrowserSession,
   unpairArtComputer
-} from "@feralfile/play";
+} from "@feralfile/display";
 
 const session = await requestEphemeralSessionWithPairingUi({
   brokerBaseUrl: "https://handoff.feralfile.com",
@@ -195,7 +195,8 @@ await displayDp1Playlist({ session, playlist });
   issued the grant, the grant's controller id, and its lifetime. There is no
   token. The grant's P-256 keys are generated non-extractable in the browser,
   never leave it, and are stored with the grant and its request counter as one
-  IndexedDB record (database `ff-play`, store `displayGrants`, keyed by your
+  IndexedDB record (database `ff-play`, a name kept from `@feralfile/play` so
+  stored grants survive the rename; store `displayGrants`, keyed by your
   site's origin). Every pairing generates fresh keys.
 - IndexedDB is required: without it, or with `storage: false`, pairing fails
   with `storage_unavailable`.
@@ -204,11 +205,11 @@ await displayDp1Playlist({ session, playlist });
   comes back with `persistent: true` and no `expiresAt`: it does not expire,
   and any `requestedExpiresInSeconds` your site asked for is ignored. Grants
   the owner does not keep carry an `expiresAt` and expire as before.
-- A grant can only play a playlist: the FF1 refuses any other command from it.
+- A grant can only display a playlist: the FF1 refuses any other command from it.
   Expiry and revocation are enforced by the FF1 itself; the owner can remove
   the site in the app at any time, and the site can `unpairArtComputer()`.
 - On a cast the FF1 answers with a verified `access_revoked` or `expired`, or
-  with the grant past its `expiresAt`, the library throws a `PlayError` with
+  with the grant past its `expiresAt`, the library throws a `DisplayError` with
   code `session_rejected` and deletes the grant; the wrapped button then
   re-pairs on the next click. Custom integrations should prompt to pair again.
 - On a cast some channel peer answers with an unverified `unknown_controller`
@@ -223,13 +224,13 @@ await displayDp1Playlist({ session, playlist });
 
 ## Errors
 
-Errors are `PlayError` instances carrying a stable `code`. Match on
+Errors are `DisplayError` instances carrying a stable `code`. Match on
 `error.code` — messages are for humans and may change between versions;
 codes will not. `pairingErrorMessage(error)` maps them to user-facing text.
 
 | `error.code` | Meaning |
 | :-- | :-- |
-| `pairing_code_expired` | The channel expired before an Art Computer joined (headless `requestEphemeralSession` with no `channelRegenerations`). Press play again for a fresh code. |
+| `pairing_code_expired` | The channel expired before an Art Computer joined (headless `requestEphemeralSession` with no `channelRegenerations`). Try again for a fresh code. |
 | `mint_rejected` | The owner declined the approval in the mobile app, or the FF1 refused the request for another reason. |
 | `approval_timeout` | Nobody approved: no answer within `maxWaitMs` (default 5 minutes) after the Art Computer joined, the FF1's own 5-minute approval deadline passed (`mint_rejected` reason `approval_expired`, mapped to this code), or every replacement channel expired before one joined. |
 | `device_unsupported` | The FF1 cannot issue a display grant: its FF OS predates display grants, or it has no relay v2 endpoint configured. Tell the visitor to update the Art Computer. |
@@ -239,7 +240,7 @@ codes will not. `pairingErrorMessage(error)` maps them to user-facing text.
 | `device_unrecognized` | The FF1 answered that it does not know this grant, but unverified. The grant is kept; the wrapped button offers "Pair again?", custom integrations ask the visitor before clearing. |
 | `pairing_canceled` | User closed the pairing dialog, or your `signal` aborted. |
 | `display_rejected` | The FF1 verified the request and refused it (`permission_denied`, or the player failed). |
-| `display_failed` | This page's pairing was replaced by another tab's (reload and play again), the FF1 is offline (no peer on its relay channel), the relay refused the connection (its per-address cap: more than 6 tabs casting at once from one network answer "Too many casts at once…"), no verified reply arrived before the deadline, the relay dropped the connection after the send, or the FF1 reported a replayed request. Nothing is resent automatically: press play again. |
+| `display_failed` | This page's pairing was replaced by another tab's (reload and try again), the FF1 is offline (no peer on its relay channel), the relay refused the connection (its per-address cap: more than 6 tabs casting at once from one network answer "Too many casts at once…"), no verified reply arrived before the deadline, the relay dropped the connection after the send, or the FF1 reported a replayed request. Nothing is resent automatically: the visitor tries again. |
 
 ## Network endpoints
 
@@ -253,7 +254,7 @@ The visitor's browser talks to two hosts. If your site sets a
   the `wss:` scheme. The FF1 names the host in the grant it issues
   (`relayV2Endpoint`), and the library uses only that; you have to write the
   policy before any grant exists, so allow the relay v2 host Feral File
-  announces in the release notes for `@feralfile/play`. The 0.4 relayer host
+  announces in the release notes for `@feralfile/display`. The 0.4 relayer host
   (`tv-cast-coordination.autonomy-system.workers.dev`) is no longer used.
 
 `https://link.feralfile.com` needs no entry. The app link is a navigation (the
@@ -268,7 +269,8 @@ playlist.
 ## Try it against the sample
 
 The [integration sample](../integration/sample) is this exact flow as a
-minimal page — paste a DP-1 payload, press play. From the repo root:
+minimal page — paste a DP-1 payload, press **Display on Art Computer**. From
+the repo root:
 
 ```sh
 cd integration && npm ci && npm run sample:dev
@@ -279,8 +281,20 @@ uses the hosted broker by default, so no local server is needed.
 
 ## Status
 
-This guide documents `@feralfile/play` 0.5.0, which casts only with a
-device-issued display grant over relay v2. It is a breaking 0.x release:
+This guide documents `@feralfile/display` 0.5.0, the library's first release
+under its new name; through 0.4.0 it was `@feralfile/play`. Moving from
+`@feralfile/play` 0.4 means changing the package name and import specifier and
+taking the breaking changes below. The `Play` names
+(`mountPlayOnArtComputerButton`, `PlayOnArtComputerButtonOptions`,
+`PlayOnArtComputerButtonHandle`, `PlayError`, `PlayErrorCode`, and the
+`ff-ac-play*` CSS classes) keep working in 0.5.x as deprecated aliases of the
+`Display` names and go in 0.6.0; the library's
+[README](../clients/session-recipient/js/README.md#renamed-from-feralfileplay)
+lists them. The default button label is "Display on Art Computer" and an
+error's `name` is `"DisplayError"`.
+
+0.5.0 casts only with a device-issued display grant over relay v2. It is a
+breaking 0.x release:
 
 - `EphemeralBrowserSession` is `{ deviceId, ctl, expiresAt?, persistent }`;
   `token`, `sessionId` and `relayerBaseUrl` are gone, as is the
@@ -302,7 +316,9 @@ device-issued display grant over relay v2. It is a breaking 0.x release:
 
 Which library works with which Art Computer:
 
-| Art Computer | `@feralfile/play` | Result |
+0.4 is `@feralfile/play`; 0.5 is `@feralfile/display`.
+
+| Art Computer | Library | Result |
 | :-- | :-- | :-- |
 | FF OS without display grants | 0.4 | browser session, as before |
 | FF OS without display grants | 0.5 | `device_unsupported` (the device mints a session, which 0.5 discards; the row stays under Paired sites until it expires or is removed) |

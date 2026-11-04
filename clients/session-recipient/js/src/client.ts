@@ -3,7 +3,7 @@ import { revokeDisplayGrant, grantExpired } from "./cast.js";
 import { parseProfile } from "./control/codec.js";
 import { exportPublicJwk as exportStrippedPublicJwk, generateAgreementKeyPair, generateSigningKeyPair, thumbprint, type PublicJwk } from "./control/jwk.js";
 import { relayURL, type SocketFactory } from "./control/relay-client.js";
-import { PlayError, type PlayErrorCode } from "./errors.js";
+import { DisplayError, type DisplayErrorCode } from "./errors.js";
 import {
   decryptChannelMessage,
   encryptChannelMessage,
@@ -223,11 +223,11 @@ function requiredJwk(record: Record<string, unknown>, key: string, errorMessage:
 async function jsonResponse(
   response: Response,
   errorPrefix: string,
-  codeByStatus?: Record<number, PlayErrorCode>,
-  defaultCode?: PlayErrorCode
+  codeByStatus?: Record<number, DisplayErrorCode>,
+  defaultCode?: DisplayErrorCode
 ): Promise<unknown> {
   if (!response.ok) {
-    throw new PlayError(`${errorPrefix}: ${String(response.status)}`, codeByStatus?.[response.status] ?? defaultCode);
+    throw new DisplayError(`${errorPrefix}: ${String(response.status)}`, codeByStatus?.[response.status] ?? defaultCode);
   }
   try {
     return await response.json() as unknown;
@@ -368,7 +368,7 @@ function isMessageRole(value: string): value is MessageRole {
 }
 
 /** The `mint_rejected` reasons the FF1 gives a 0.5 request, by error code. */
-const rejectionCodes: Record<string, PlayErrorCode> = {
+const rejectionCodes: Record<string, DisplayErrorCode> = {
   display_grant_unavailable: "device_unsupported",
   too_many_sites: "too_many_sites",
   // The FF1's own approval deadline (5 minutes) passed with no answer: the
@@ -397,15 +397,15 @@ async function parseMintResult(value: unknown, channelId: string, requestMessage
     const reason = optionalString(value, "reason");
     const code = reason === undefined ? undefined : rejectionCodes[reason];
     if (code === "device_unsupported") {
-      throw new PlayError("this FF1 cannot issue a display grant; it needs an FF OS update", code);
+      throw new DisplayError("this FF1 cannot issue a display grant; it needs an FF OS update", code);
     }
     if (code === "too_many_sites") {
-      throw new PlayError("this FF1 has as many paired sites as it allows", code);
+      throw new DisplayError("this FF1 has as many paired sites as it allows", code);
     }
     if (code === "approval_timeout") {
-      throw new PlayError("the FF1 stopped waiting for approval", code);
+      throw new DisplayError("the FF1 stopped waiting for approval", code);
     }
-    throw new PlayError("mint request rejected", "mint_rejected");
+    throw new DisplayError("mint request rejected", "mint_rejected");
   }
   if (value["type"] !== "mint_succeeded") {
     throw new Error("mint result invalid");
@@ -413,7 +413,7 @@ async function parseMintResult(value: unknown, channelId: string, requestMessage
   const grant = value["displayGrant"];
   if (!isRecord(grant)) {
     // Older firmware ignores the keys and mints a session; it is discarded.
-    throw new PlayError("this FF1 needs an FF OS update", "device_unsupported");
+    throw new DisplayError("this FF1 needs an FF OS update", "device_unsupported");
   }
   if (grant["v"] !== 1 || requiredString(grant, "ctl", "mint result invalid") !== expectedCtl) {
     throw new Error("mint result invalid");
@@ -626,7 +626,7 @@ function sessionOf(record: StoredDisplayGrant): EphemeralBrowserSession {
 
 /**
  * Reads the grant stored for this origin. An expired grant is dropped from
- * storage, so the next play re-pairs instead of sealing with keys the FF1
+ * storage, so the next display request re-pairs instead of sealing with keys the FF1
  * will refuse. Resolves to undefined without IndexedDB.
  */
 export async function readStoredEphemeralBrowserSession(origin: string): Promise<EphemeralBrowserSession | undefined> {
@@ -686,8 +686,8 @@ export function validateAppLinkBaseUrl(value: string | undefined): string {
   return appLinkBaseUrl;
 }
 
-function canceledError(): PlayError {
-  return new PlayError("pairing canceled", "pairing_canceled");
+function canceledError(): DisplayError {
+  return new DisplayError("pairing canceled", "pairing_canceled");
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
@@ -835,7 +835,7 @@ async function completeMint(input: {
     approvalController.abort();
   }
   const deadlineTimer = setTimeout(abortApproval, Math.max(0, input.maxWaitMs));
-  const timedOut = (): PlayError => new PlayError("poll timed out", "approval_timeout");
+  const timedOut = (): DisplayError => new DisplayError("poll timed out", "approval_timeout");
   try {
     try {
       await sendMintRequest({ fetcher: context.fetcher, channel, encrypted: encryptedRequest, signal: approvalController.signal });
@@ -919,7 +919,7 @@ export async function requestEphemeralSession(options: RequestEphemeralSessionOp
   const brokerBaseUrl = normalizeBaseUrl(options.brokerBaseUrl);
   const browserInfo = { ...defaultBrowserInfo(), ...options.browserInfo };
   if (options.storage === false || !hasIndexedDb()) {
-    throw new PlayError("IndexedDB is required to keep the display grant and its keys", "storage_unavailable");
+    throw new DisplayError("IndexedDB is required to keep the display grant and its keys", "storage_unavailable");
   }
   removeLegacySession(origin);
   // Read raw: an expired grant is still revoked once it has been replaced.
@@ -1010,8 +1010,8 @@ export async function requestEphemeralSession(options: RequestEphemeralSessionOp
           continue;
         }
         throw channelRegenerations === 0
-          ? new PlayError("pairing code expired", "pairing_code_expired")
-          : new PlayError("pairing timed out", "approval_timeout");
+          ? new DisplayError("pairing code expired", "pairing_code_expired")
+          : new DisplayError("pairing timed out", "approval_timeout");
       }
       throw error;
     }

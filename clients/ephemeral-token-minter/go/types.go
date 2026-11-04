@@ -85,7 +85,7 @@ type BrowserInfo struct {
 // DisplayGrant is the requester's displayGrant member exactly as sent, or nil
 // when it sent none or sent null (both mean a 0.4 request). It is never validated here, so a malformed one never fails
 // a poll or a join: a requester that sends the member at all is asking for a
-// display grant (@feralfile/play 0.5.0 and later), and the host reads its keys
+// display grant (@feralfile/display 0.5.0 and later), and the host reads its keys
 // with ParseDisplayGrantKeys.
 type MintRequest struct {
 	ChannelID                  string

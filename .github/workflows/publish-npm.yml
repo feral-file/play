@@ -1,16 +1,24 @@
 name: publish-npm
 
-# Publishes @feralfile/play (clients/session-recipient/js) when a GitHub
-# release is published. Auth is npm OIDC trusted publishing (same pattern as
-# @feralfile/cli): configure the trusted publisher for @feralfile/play on
-# npmjs.org to point at this repo + this workflow file, environment blank.
+# Publishes @feralfile/display (clients/session-recipient/js) when a GitHub
+# release is published. The package was @feralfile/play through 0.4.0; this
+# workflow no longer publishes that name.
 #
-# First release only: the trusted publisher cannot be configured before the
-# package exists (npm/cli#8544), so cut 0.1.0 with an NPM_TOKEN repo secret
-# (granular automation token with publish rights on the @feralfile scope).
-# Then wire the trusted publisher on the package's npm settings page and
-# delete the secret — the publish step below prefers OIDC when no token is
-# present.
+# Auth is npm OIDC trusted publishing (same pattern as @feralfile/cli): the
+# trusted publisher for @feralfile/display on npmjs.com points at
+# feral-file/play, workflow file publish-npm.yml, environment blank, with
+# direct `npm publish` allowed (configurations made after 2026-09-03 allow
+# only `npm stage publish` unless that box is ticked).
+#
+# Bootstrap: npm configures a trusted publisher only for a package that
+# exists, and expires a configuration that has not published within 2 days.
+# So the first version of @feralfile/display is published by an npm owner by
+# hand (`npm publish --access public` in clients/session-recipient/js at the
+# release commit); the GitHub release for that version then finds it on npm,
+# skips the publish and attaches the bundles. The trusted publisher is
+# configured right before the next release is cut. An NPM_TOKEN repo secret,
+# if present, is used instead of OIDC (the path @feralfile/play 0.1.0 took);
+# delete it once the trusted publisher works.
 
 on:
   release:
@@ -20,11 +28,13 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      # write: the job attaches the browser bundle (dist/play.js) to the release.
+      # write: the job attaches the browser bundle (dist/display.js) to the release.
       contents: write
       # OIDC token used by `npm publish --provenance` to authenticate against
-      # the trusted publisher configured for @feralfile/play on npmjs.org.
+      # the trusted publisher configured for @feralfile/display on npmjs.com.
       id-token: write
+    env:
+      PACKAGE_NAME: "@feralfile/display"
     defaults:
       run:
         working-directory: clients/session-recipient/js
@@ -40,9 +50,15 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Verify package version matches tag
+      - name: Verify package name and version match the tag
         run: |
           set -euo pipefail
+
+          PACKAGE_JSON_NAME=$(node -p "require('./package.json').name")
+          if [ "$PACKAGE_JSON_NAME" != "$PACKAGE_NAME" ]; then
+            echo "Name mismatch: package.json is $PACKAGE_JSON_NAME but this workflow publishes $PACKAGE_NAME."
+            exit 1
+          fi
 
           PACKAGE_VERSION=$(node -p "require('./package.json').version")
           TAG_VERSION="${{ github.event.release.tag_name }}"
@@ -71,18 +87,15 @@ jobs:
           VERSION=$(node -p "require('./package.json').version")
 
           # Idempotent: re-running a release for an already-published version
-          # verifies instead of failing.
-          if npm view "@feralfile/play@${VERSION}" version > /dev/null 2>&1; then
-            echo "@feralfile/play@${VERSION} is already published; skipping."
+          # verifies instead of failing. This is also the bootstrap path: the
+          # first version, published by hand, is skipped here.
+          if npm view "${PACKAGE_NAME}@${VERSION}" version > /dev/null 2>&1; then
+            echo "${PACKAGE_NAME}@${VERSION} is already published; skipping."
             exit 0
           fi
 
-          # Bootstrap path, mirroring source-resolver and ff-cli's pre-OIDC
-          # release era: npm cannot configure a trusted publisher for a package
-          # that does not exist yet (npm/cli#8544), so the first publish
-          # authenticates with an NPM_TOKEN repo secret. Once the package
-          # exists and its trusted publisher is wired on npmjs.com, delete the
-          # secret — publishes then use OIDC with no workflow change.
+          # Token path, for a bootstrap through CI instead of by hand (see the
+          # header). Without the secret, publishes use OIDC.
           if [ -n "${NPM_TOKEN}" ]; then
             echo "NPM_TOKEN secret present: publishing with token auth (bootstrap path)."
             export NODE_AUTH_TOKEN="${NPM_TOKEN}"
@@ -90,7 +103,10 @@ jobs:
             echo "No NPM_TOKEN secret: publishing via OIDC trusted publishing."
           fi
 
-          npm publish --access public --provenance
+          if ! npm publish --access public --provenance; then
+            echo "::error::npm publish failed. If ${PACKAGE_NAME} has no trusted publisher yet, or it expired (2 days without a publish), configure it on npmjs.com (feral-file/play, publish-npm.yml, environment blank, npm publish allowed) and re-run this job."
+            exit 1
+          fi
 
       - name: Attach browser bundle to release
         env:
@@ -100,7 +116,10 @@ jobs:
 
           npm run build
           npm run bundle
-          gh release upload "${{ github.event.release.tag_name }}" dist/play.js \
+          # 0.5.x also attaches the bundle under its old name, play.js, for
+          # sites that fetch it by that name; drop the copy in 0.6.0.
+          cp dist/display.js dist/play.js
+          gh release upload "${{ github.event.release.tag_name }}" dist/display.js dist/play.js \
             --clobber --repo "${{ github.repository }}"
 
       - name: Verify npm package version
@@ -112,7 +131,7 @@ jobs:
           SLEEP_SECONDS=10
 
           for attempt in $(seq 1 "$ATTEMPTS"); do
-            NPM_VERSION=$(npm view @feralfile/play version)
+            NPM_VERSION=$(npm view "${PACKAGE_NAME}" version)
             if [ "$NPM_VERSION" = "$TAG" ]; then
               echo "npm version check passed: $NPM_VERSION"
               exit 0
