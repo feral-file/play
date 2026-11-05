@@ -703,10 +703,12 @@ export async function readStoredEphemeralBrowserSession(origin: string): Promise
 
 /**
  * Reads the origin's grant, raw (expired or not). `usable` is false when the
- * grant store cannot be used at all: no IndexedDB, or one that refuses to open
- * (a SecurityError in a sandboxed or storage-blocked frame). A stored relayer
- * session lives in localStorage and is still read then; only a new pairing
- * needs the grant store. Any other failure (a corrupt record) still throws.
+ * grant store cannot be used: no IndexedDB, or any IndexedDB open, request or
+ * transaction error, which grantStore.ts reports as `storage_unavailable` (a
+ * SecurityError in a sandboxed or storage-blocked frame among them). A stored
+ * relayer session lives in localStorage and is still read then; only a new
+ * pairing needs the grant store. Only a stored record whose ctl does not
+ * match its signing key (`display_failed`, from checkedGrant) still throws.
  */
 async function readGrantStore(origin: string): Promise<{ usable: boolean; record: StoredDisplayGrant | undefined }> {
   if (!hasIndexedDb()) {
