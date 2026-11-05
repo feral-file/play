@@ -218,7 +218,8 @@ codes will not. `pairingErrorMessage(error)` maps them to user-facing text.
 | `approval_timeout` | No approval within `maxWaitMs` (default 5 minutes) after the Art Computer joined, or every replacement channel expired before one joined. |
 | `session_rejected` | Stored session expired or revoked — the wrapped button clears it; custom integrations clear and re-pair. |
 | `pairing_canceled` | User closed the pairing dialog, or your `signal` aborted. |
-| `display_failed` / `display_rejected` | The relayer or FF1 refused the display request. |
+| `display_failed` | The display request did not go through. The message says why, worded for the visitor: the Art Computer is offline, it did not answer, Feral File was busy or unreachable, or an error number. Show it as it is. |
+| `display_rejected` | The Art Computer received the playlist and refused it. |
 
 ## Network endpoints
 

@@ -167,7 +167,11 @@ export function pairingErrorMessage(error: unknown): string {
         return "Timed out waiting for your Art Computer. Press play to try again.";
       case "session_rejected":
         return "The stored browser session was rejected. Pair again.";
+      case "display_rejected":
+        return "Your Art Computer refused the playlist.";
       default:
+        // display_failed messages are already worded for the visitor and
+        // say why the display failed; they are shown as they are.
         break;
     }
   }

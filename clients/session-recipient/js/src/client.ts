@@ -1004,14 +1004,71 @@ export async function displayDp1Playlist(options: DisplayDp1PlaylistOptions): Pr
     if (!(error instanceof TypeError)) {
       throw error;
     }
-    response = await fetcher(castUrl, init);
+    try {
+      response = await fetcher(castUrl, init);
+    } catch (retryError) {
+      if (retryError instanceof TypeError) {
+        throw new PlayError(relayerUnreachableMessage, "display_failed");
+      }
+      throw retryError;
+    }
   }
 
   if (response.status === 401 || response.status === 403) {
     throw new PlayError("browser session rejected", "session_rejected");
   }
+  if (!response.ok) {
+    throw displayFailure(response.status, await relayerErrorId(response));
+  }
   const result = await jsonResponse(response, "display request failed", undefined, "display_failed");
   if (extractOk(result) === false) {
     throw new PlayError("FF1 rejected display request", "display_rejected");
   }
+}
+
+// Display failures are worded for the visitor, because the wrapped button
+// shows `display_failed` messages as they are. Each one says what went wrong
+// and what to do about it; a failure the relayer does not name carries its
+// number, so a report can be traced.
+const relayerUnreachableMessage = "Could not reach Feral File from this page. Check the internet connection and try again.";
+const artComputerOfflineMessage = "Your Art Computer is offline. Check that it is on and connected to the internet, then try again.";
+const artComputerNoAnswerMessage = "Your Art Computer did not answer. Try again in a moment.";
+const relayerBusyMessage = "Feral File could not send this right now. Try again in a moment.";
+
+/** ff-relayer error ids (ff-relayer docs/api.md, Error Codes) the display path names. */
+const relayerNoArtComputer = 1003;
+const relayerArtComputerTimeout = 1004;
+const relayerSessionStoreBusy = 1008;
+
+function displayFailure(status: number, relayerId: number | undefined): PlayError {
+  switch (relayerId) {
+    case relayerNoArtComputer:
+      // No socket from the Art Computer on the session's topic: it is off,
+      // has no internet, or has not reconnected to the relayer.
+      return new PlayError(artComputerOfflineMessage, "display_failed");
+    case relayerArtComputerTimeout:
+      return new PlayError(artComputerNoAnswerMessage, "display_failed");
+    case relayerSessionStoreBusy:
+      return new PlayError(relayerBusyMessage, "display_failed");
+    default:
+      return new PlayError(`Could not send to your Art Computer (error ${String(relayerId ?? status)}). Try again.`, "display_failed");
+  }
+}
+
+/**
+ * The numeric `error.id` of a failed relayer response, if it has one. Only
+ * the number is read; the body is never quoted into an error.
+ */
+async function relayerErrorId(response: Response): Promise<number | undefined> {
+  let body: unknown;
+  try {
+    body = await response.json() as unknown;
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(body) || !isRecord(body["error"])) {
+    return undefined;
+  }
+  const id = body["error"]["id"];
+  return typeof id === "number" && Number.isSafeInteger(id) ? id : undefined;
 }
