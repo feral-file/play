@@ -11,7 +11,7 @@ import {
   generateBrowserKeyPair,
   requestEphemeralSession,
   type PairingMaterial
-} from "@feralfile/play";
+} from "@feralfile/display";
 
 type JoinChannelResponse = {
   channelId: string;

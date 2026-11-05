@@ -1,8 +1,12 @@
 name: publish-npm
 
-# Publishes @feralfile/play (clients/session-recipient/js) when a GitHub
-# release is published. Auth is npm OIDC trusted publishing (same pattern as
-# @feralfile/cli): configure the trusted publisher for @feralfile/play on
+# Publishes @feralfile/display (clients/session-recipient/js) when a GitHub
+# release is published. This is the 0.4 line (release/0.4): the ff-relayer
+# session path that today's FF OS speaks. Through 0.4.1 the package was
+# @feralfile/play. 0.4.2 is published by hand with an explicit dist-tag,
+# because npm will not move `latest` below the 0.5.0 already published; a
+# later 0.4.x is above `latest` and publishes here as usual. Auth is npm OIDC trusted publishing (same pattern as
+# @feralfile/cli): configure the trusted publisher for @feralfile/display on
 # npmjs.org to point at this repo + this workflow file, environment blank.
 #
 # First release only: the trusted publisher cannot be configured before the
@@ -20,10 +24,11 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      # write: the job attaches the browser bundle (dist/play.js) to the release.
+      # write: the job attaches the browser bundle (dist/display.js, and a
+      # play.js copy for sites that self-host under the old name) to the release.
       contents: write
       # OIDC token used by `npm publish --provenance` to authenticate against
-      # the trusted publisher configured for @feralfile/play on npmjs.org.
+      # the trusted publisher configured for @feralfile/display on npmjs.org.
       id-token: write
     defaults:
       run:
@@ -72,8 +77,8 @@ jobs:
 
           # Idempotent: re-running a release for an already-published version
           # verifies instead of failing.
-          if npm view "@feralfile/play@${VERSION}" version > /dev/null 2>&1; then
-            echo "@feralfile/play@${VERSION} is already published; skipping."
+          if npm view "@feralfile/display@${VERSION}" version > /dev/null 2>&1; then
+            echo "@feralfile/display@${VERSION} is already published; skipping."
             exit 0
           fi
 
@@ -100,7 +105,8 @@ jobs:
 
           npm run build
           npm run bundle
-          gh release upload "${{ github.event.release.tag_name }}" dist/play.js \
+          cp dist/display.js dist/play.js
+          gh release upload "${{ github.event.release.tag_name }}" dist/display.js dist/play.js \
             --clobber --repo "${{ github.repository }}"
 
       - name: Verify npm package version
@@ -112,7 +118,7 @@ jobs:
           SLEEP_SECONDS=10
 
           for attempt in $(seq 1 "$ATTEMPTS"); do
-            NPM_VERSION=$(npm view @feralfile/play version)
+            NPM_VERSION=$(npm view "@feralfile/display@${TAG}" version)
             if [ "$NPM_VERSION" = "$TAG" ]; then
               echo "npm version check passed: $NPM_VERSION"
               exit 0

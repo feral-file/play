@@ -1,7 +1,7 @@
 {
-  "name": "@feralfile/play",
-  "version": "0.4.1",
-  "description": "Add a Play on Art Computer button to your website: pair a visitor's browser with their Feral File Art Computer and play a DP-1 playlist on it.",
+  "name": "@feralfile/display",
+  "version": "0.4.2",
+  "description": "Add a Display on Art Computer button to your website: pair a visitor's browser with their Feral File Art Computer and display a DP-1 playlist on it.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "dist/index.js",
@@ -21,12 +21,13 @@
     "url": "git+https://github.com/feral-file/play.git",
     "directory": "clients/session-recipient/js"
   },
-  "homepage": "https://docs.feralfile.com/art-computer/play/",
+  "homepage": "https://docs.feralfile.com/art-computer/display/",
   "keywords": [
     "feralfile",
     "art-computer",
     "dp1",
-    "digital-art"
+    "digital-art",
+    "display"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -34,7 +35,7 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "bundle": "esbuild src/index.ts --bundle --format=esm --minify --outfile=dist/play.js"
+    "bundle": "esbuild src/index.ts --bundle --format=esm --minify --outfile=dist/display.js"
   },
   "devDependencies": {
     "@types/node": "^20.14.11",

@@ -1,6 +1,6 @@
 # Integration Guide
 
-This guide adds a **Play on Art Computer** action to your product: someone
+This guide adds a **Display on Art Computer** action to your product: someone
 selects works, presses play, and the works appear on their Feral File Art
 Computer (FF1). It is for any product where people encounter art — a
 marketplace, an artist's site, a gallery app, an agent. You embed a browser
@@ -14,7 +14,7 @@ implement the same flow directly against the documented protocol
 
 What the visitor experiences:
 
-1. They press **Play on Art Computer** on your site.
+1. They press **Display on Art Computer** on your site.
 2. First time only, a pairing dialog opens:
    - **On a phone or tablet**, it shows **Open the Feral File app**. They tap it, the app
      opens with the request, and they tap **Accept**. Below the button is a
@@ -49,14 +49,14 @@ full model is in [Sequential Flow](sequential-flow.md).
 
 ## What you need
 
-- The requester library: [`@feralfile/play`](https://www.npmjs.com/package/@feralfile/play)
-  (`npm i @feralfile/play`), source in this repo at
+- The requester library: [`@feralfile/display`](https://www.npmjs.com/package/@feralfile/display)
+  (`npm i @feralfile/display@0.4`), source in this repo at
   [`clients/session-recipient/js`](../clients/session-recipient/js). For a
-  site with no build step, download `play.js` from the
-  [latest release](https://github.com/feral-file/play/releases/latest) — a
+  site with no build step, download `display.js` from the
+  [0.4.2 release](https://github.com/feral-file/play/releases/tag/0.4.2) — a
   self-contained ESM bundle — host it next to your pages, and
-  `import { mountPlayOnArtComputerButton } from "./play.js"`. A CDN import
-  (`https://esm.sh/@feralfile/play`) also works for quick experiments, but
+  `import { mountDisplayOnArtComputerButton } from "./display.js"`. A CDN import
+  (`https://esm.sh/@feralfile/display@0.4`) also works for quick experiments, but
   self-hosting keeps your integration free of infrastructure that neither of
   us operates.
 - A [DP-1](https://github.com/display-protocol/dp1) playlist document for the
@@ -71,9 +71,9 @@ Your visitor needs an FF1 and the Feral File mobile app with their FF1 added.
 ## Quickest path: mount the button
 
 ```ts
-import { mountPlayOnArtComputerButton } from "@feralfile/play";
+import { mountDisplayOnArtComputerButton } from "@feralfile/display";
 
-mountPlayOnArtComputerButton({
+mountDisplayOnArtComputerButton({
   container: "#play-on-art-computer",
   playlist: () => buildDp1PlaylistFromSelection(),
   brokerBaseUrl: "https://handoff.feralfile.com",
@@ -132,7 +132,7 @@ import {
   displayDp1Playlist,
   hasStoredEphemeralBrowserSession,
   clearStoredEphemeralBrowserSession
-} from "@feralfile/play";
+} from "@feralfile/display";
 
 const session = await requestEphemeralSessionWithPairingUi({
   brokerBaseUrl: "https://handoff.feralfile.com",
@@ -200,14 +200,15 @@ await displayDp1Playlist({
   library is the whole fix — nothing changes on the device.
 - Expiry and revocation are enforced by `ff-relayer`. The user can revoke a
   browser session from the Feral File side at any time.
-- On a display attempt with a dead session the library throws a `PlayError`
+- On a display attempt with a dead session the library throws a `DisplayError`
   with code `session_rejected`; the wrapped button clears the stored session
   automatically so the next click re-pairs. Custom integrations should call
   `clearStoredEphemeralBrowserSession` on that code and prompt to pair again.
 
 ## Errors
 
-Errors are `PlayError` instances carrying a stable `code`. Match on
+Errors are `DisplayError` instances (`PlayError` is the same class under its
+old name) carrying a stable `code`. Match on
 `error.code` — messages are for humans and may change between versions;
 codes will not. `pairingErrorMessage(error)` maps them to user-facing text.
 
@@ -234,7 +235,7 @@ The visitor's browser talks to two hosts. If your site sets a
   The approved session then carries the base URL actually used
   (`session.relayerBaseUrl`) — read it from there at runtime rather than
   hard-coding a host in your display code. If the host changes, the change is
-  announced in the release notes for `@feralfile/play`.
+  announced in the release notes for `@feralfile/display`.
 
 `https://link.feralfile.com` needs no entry. The app link is a navigation (the
 visitor taps it, or scans its QR with another device), never a `fetch`, and the
@@ -258,7 +259,9 @@ uses the hosted broker by default, so no local server is needed.
 
 ## Status
 
-This guide documents `@feralfile/play` 0.4.0, where the site starts pairing.
+This guide documents `@feralfile/display` 0.4.2, the 0.4 library under its new
+name: through 0.4.1 it was `@feralfile/play`, and the old export names keep
+working as deprecated aliases. 0.4.0 is where the site starts pairing.
 Libraries up to 0.3.x paired the other way — the Art Computer showed a code
 and the visitor typed it into the site — and the hosted broker still serves
 that path for sites that have not upgraded. Upgrading from 0.3.x: drop the
