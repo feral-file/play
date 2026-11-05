@@ -233,8 +233,11 @@ apart.
   channel. That is what an FF1 answers after it updates to FF OS with display
   grants, and also what an old FF1 that is switched off answers, so the
   library throws `device_unrecognized` and **keeps** the session. The wrapped
-  button offers "Pair again?"; the visitor's click clears it, and pairing an
-  updated FF1 yields a grant.
+  button says "Could not reach your Art Computer. If it is on and was updated
+  recently, pair again." and offers "Pair again?". That click pairs without
+  deleting the session first: pairing an updated FF1 yields a grant, which
+  replaces the session, and a pairing that fails or is canceled leaves the
+  session in place for when the FF1 is back on.
 - A relayer session stops working when Feral File retires the legacy relayer.
   FF1s still on 2.0.x by then update on their own; their visitors pair again.
 

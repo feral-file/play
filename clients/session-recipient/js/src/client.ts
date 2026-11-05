@@ -970,7 +970,16 @@ async function completeMint(input: {
  * still stored is replaced only once the new one has arrived, and the old one
  * is then revoked on a best-effort basis.
  */
-export async function requestEphemeralSession(options: RequestEphemeralSessionOptions): Promise<EphemeralBrowserSession> {
+export async function requestEphemeralSession(
+  options: RequestEphemeralSessionOptions,
+  /**
+   * @internal The wrapped button's "Pair again?" after a relayer session got
+   * 1003: pair past the stored session without deleting it first, so it
+   * survives a pairing that fails (an old FF1 that is only off answers 1003
+   * too). A new pairing's store replaces it.
+   */
+  internal: { skipStoredSession?: boolean } = {}
+): Promise<EphemeralBrowserSession> {
   const fetcher = options.fetchImpl ?? defaultFetch();
   const origin = currentOrigin();
   const requestedExpiresInSeconds = validateRequestedExpiresInSeconds(options.requestedExpiresInSeconds);
@@ -979,17 +988,21 @@ export async function requestEphemeralSession(options: RequestEphemeralSessionOp
   const appLinkBaseUrl = validateAppLinkBaseUrl(options.appLinkBaseUrl);
   const brokerBaseUrl = normalizeBaseUrl(options.brokerBaseUrl);
   const browserInfo = { ...defaultBrowserInfo(), ...options.browserInfo };
-  if (options.storage === false || !hasIndexedDb()) {
+  if (options.storage === false) {
     throw new DisplayError("IndexedDB is required to keep the display grant and its keys", "storage_unavailable");
   }
   // Read raw: an expired grant is still revoked once it has been replaced.
-  const existing = await readStoredDisplayGrant(origin);
+  const existing = hasIndexedDb() ? await readStoredDisplayGrant(origin) : undefined;
   if (existing !== undefined && !grantExpired(existing)) {
     return sessionOf(existing);
   }
-  const existingSession = readStoredRelayerSession(origin);
+  const existingSession = internal.skipStoredSession === true ? undefined : readStoredRelayerSession(origin);
   if (existingSession !== undefined) {
     return relayerSessionOf(existingSession);
+  }
+  // Only a new pairing needs IndexedDB: its grant keys are stored there.
+  if (!hasIndexedDb()) {
+    throw new DisplayError("IndexedDB is required to keep the display grant and its keys", "storage_unavailable");
   }
 
   const signal = options.signal;

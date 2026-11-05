@@ -854,6 +854,7 @@ describe("mountDisplayOnArtComputerButton", () => {
       expect(broker.channels).toHaveLength(0);
       expect((failures[0] as DisplayError).code).toBe("device_unrecognized");
       expect(handle.element.textContent).toBe("Pair again?");
+      expect(handle.statusElement.textContent).toBe("Could not reach your Art Computer. If it is on and was updated recently, pair again.");
       // Kept: an old FF1 that is only off answers the same.
       expect(entries.size).toBe(1);
 
@@ -863,6 +864,63 @@ describe("mountDisplayOnArtComputerButton", () => {
       expect(relay.ff1.seen[0]).toMatchObject({ ctl: broker.issued[0]?.ctl, cmd: "displayPlaylist" });
       expect(casts).toHaveLength(1);
       expect(handle.element.textContent).toBe("Display on Art Computer");
+    } finally {
+      uninstallLocalStorage();
+    }
+  });
+
+  it("keeps the relayer session through a Pair again that fails, and casts with it once the FF1 is back", async () => {
+    const stored = JSON.stringify({ origin: testOrigin, token: "relayer-token-secret", sessionId: "sess_old", persistent: true });
+    const entries = installLocalStorage([[ephemeralBrowserSessionStorageKey(testOrigin), stored]]);
+    try {
+      // The FF1 is a 2.0.x one that is only off: 1003 first, then back.
+      const broker = await fakeBroker({ result: { type: "mint_rejected" } });
+      let relayerAnswer = { status: 400, body: { error: { id: 1003 } } as unknown };
+      const casts: string[] = [];
+      const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.endsWith("/api/cast")) {
+          casts.push(url);
+          return Promise.resolve(new Response(JSON.stringify(relayerAnswer.body), { status: relayerAnswer.status }));
+        }
+        return broker.fetchImpl(input, init);
+      });
+      const { document } = fakeDocumentWithContainer();
+      const failures: unknown[] = [];
+      let succeeded = false;
+      const handle = mountDisplayOnArtComputerButton({
+        container: "#display-button-container",
+        playlist,
+        brokerBaseUrl,
+        relayerBaseUrl: "https://relayer.example",
+        pollIntervalMs: 1,
+        fetchImpl,
+        document,
+        createDialog: () => ({ show: () => undefined, setStatus: () => undefined, close: () => undefined }),
+        onError: (error) => failures.push(error),
+        onSuccess: () => {
+          succeeded = true;
+        }
+      });
+
+      handle.element.click();
+      await waitFor(() => failures.length === 1);
+      expect((failures[0] as DisplayError).code).toBe("device_unrecognized");
+
+      // Pair again: the pairing is refused, and the session is still there.
+      handle.element.click();
+      await waitFor(() => failures.length === 2);
+      expect(broker.channels).toHaveLength(1);
+      expect((failures[1] as DisplayError).code).toBe("mint_rejected");
+      expect(entries.get(ephemeralBrowserSessionStorageKey(testOrigin))).toBe(stored);
+      expect(handle.element.textContent).toBe("Display on Art Computer");
+
+      // The FF1 is back on: the next click casts with the kept session, no pairing.
+      relayerAnswer = { status: 200, body: { ok: true } };
+      handle.element.click();
+      await waitFor(() => succeeded);
+      expect(casts).toHaveLength(2);
+      expect(broker.channels).toHaveLength(1);
     } finally {
       uninstallLocalStorage();
     }

@@ -23,7 +23,7 @@ import {
   type FakeBrokerOptions,
   type ResultKind
 } from "./fakeBroker.js";
-import { deviceOnRelay, resetIndexedDb, seedGrant } from "./grants.js";
+import { deviceOnRelay, removeIndexedDb, resetIndexedDb, seedGrant } from "./grants.js";
 import { installLocalStorage, uninstallLocalStorage } from "./localStorage.js";
 
 const testOrigin = "https://nft.example";
@@ -555,6 +555,29 @@ describe("requestEphemeralSession", () => {
       const session = await requestEphemeralSession(baseOptions(broker.fetchImpl));
       expect(session).toEqual({ kind: "relayerSession", sessionId: "sess_old", persistent: true });
       expect(broker.fetchImpl).not.toHaveBeenCalled();
+    });
+
+    it("returns a stored session without IndexedDB; only a new pairing needs it", async () => {
+      entries.set(ephemeralBrowserSessionStorageKey(testOrigin), JSON.stringify({ token: "token-secret", sessionId: "sess_old", origin: testOrigin, persistent: true }));
+      removeIndexedDb();
+      const broker = await fakeBroker();
+      expect(await requestEphemeralSession(baseOptions(broker.fetchImpl))).toEqual({ kind: "relayerSession", sessionId: "sess_old", persistent: true });
+      entries.clear();
+      expect((await captureError(requestEphemeralSession(baseOptions(broker.fetchImpl))) as DisplayError).code).toBe("storage_unavailable");
+      expect(broker.fetchImpl).not.toHaveBeenCalled();
+    });
+
+    it("pairs past a stored session when asked, keeps it if the pairing fails, and overwrites it with a new session", async () => {
+      const old = JSON.stringify({ token: "token-secret", sessionId: "sess_old", origin: testOrigin, persistent: true });
+      entries.set(ephemeralBrowserSessionStorageKey(testOrigin), old);
+      const refused = await fakeBroker({ result: { type: "mint_rejected" } });
+      await expect(requestEphemeralSession(baseOptions(refused.fetchImpl), { skipStoredSession: true })).rejects.toThrow();
+      expect(entries.get(ephemeralBrowserSessionStorageKey(testOrigin))).toBe(old);
+
+      const broker = await fakeBroker({ result: { type: "mint_succeeded", legacySession: true } });
+      const session = await requestEphemeralSession(baseOptions(broker.fetchImpl), { skipStoredSession: true });
+      expect(session).toMatchObject({ kind: "relayerSession", sessionId: "sess_123" });
+      expect(JSON.parse(entries.get(ephemeralBrowserSessionStorageKey(testOrigin)) ?? "null")).toMatchObject({ sessionId: "sess_123" });
     });
 
     it("prefers a stored grant over a stored session", async () => {

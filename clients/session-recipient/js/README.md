@@ -67,9 +67,11 @@ shows fresh material, up to twice, and then the button fails with
 When the FF1 answers a cast with an unverified `unknown_controller` or
 `bad_envelope` (a factory reset, or the site was removed on the device), the
 button fails with `device_unrecognized`, keeps the stored grant, and reads
-"Pair again?"; only the visitor's next click clears it and pairs again. A
-relayer session gets the same treatment when the legacy relayer answers
-`400 {"error":{"id":1003}}` (no FF1 on the session's channel).
+"Pair again?"; only the visitor's next click clears it and pairs again. When
+the legacy relayer answers a relayer session's cast with
+`400 {"error":{"id":1003}}` (no FF1 on the session's channel: updated, or
+off), the button also reads "Pair again?", but that click pairs without
+deleting the session; only a successful pairing replaces it.
 
 For custom UI, use `createPairingDialog`,
 `requestEphemeralSessionWithPairingUi`, `hasStoredEphemeralBrowserSession`,
@@ -147,8 +149,8 @@ are gone ([table above](#renamed-from-feralfileplay)). See
 Move straight to 0.6: it keeps the visitor's stored 0.4 session, and an FF1 on
 FF OS with display grants is paired again with a grant the first time the old
 session stops reaching it. What changed against 0.4 is below (written for
-0.5.0; 0.6.0 brings back the relayer session, `relayerBaseUrl` and
-`fetchImpl` described above).
+0.5.0; 0.6.0 brings back the relayer session, `relayerBaseUrl`,
+`fetchImpl` and `ephemeralBrowserSessionStorageKey` described above).
 
 0.5.0 is a breaking release. The library casts only with
 a device-issued display grant over relay v2; there is no relayer token, no

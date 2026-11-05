@@ -32,6 +32,13 @@ One release for every Art Computer in the field.
   `PlayError`, `PlayErrorCode`, the `ff-ac-play`, `ff-ac-play-button` and
   `ff-ac-play-status` class names, and the `play.js` release asset. Use the
   `Display` names and `ff-ac-display*` classes.
+- **Removed** `legacySessionStorageKey`: use `ephemeralBrowserSessionStorageKey`
+  (the same key).
+- On a session's 1003 the button says "Could not reach your Art Computer. If
+  it is on and was updated recently, pair again." and its "Pair again?" pairs
+  without deleting the session first: if that pairing fails, the session
+  still works once the FF1 is back. A storage-less browser (no IndexedDB)
+  still casts with a stored session; only a new pairing needs IndexedDB.
 
 ## 0.5.0
 

@@ -29,6 +29,12 @@ const defaultTimeoutMs = 30_000;
 export const tooManyCastsMessage = "Too many casts at once from this network, or the relay is unreachable. Try again in a moment.";
 /** Shown as-is by the wrapped button: the page holds a pairing another tab has since replaced. */
 export const pairingReplacedMessage = "This page's pairing was replaced by a newer one. Reload the page and try again.";
+/**
+ * Shown as-is by the wrapped button: the legacy relayer's 1003 for a relayer
+ * session. An FF1 that updated and one that is only off look the same, so the
+ * copy says both.
+ */
+export const relayerUnreachableMessage = "Could not reach your Art Computer. If it is on and was updated recently, pair again.";
 /** Bytes a request may carry before the relay's chunk pacing earns it more time. */
 const chunkSize = 32_768;
 /** A self-revoke is best effort: it gets a short deadline and its outcome is ignored. */
@@ -331,7 +337,7 @@ async function castWithRelayerSession(options: DisplayDp1PlaylistOptions, sessio
     // Never cleared here: an old FF1 that is only offline answers the same,
     // and its session still works once it is back. Only the visitor's
     // "Pair again?" clears it.
-    throw new DisplayError("the FF1 is not reachable through this site's pairing", "device_unrecognized");
+    throw new DisplayError(relayerUnreachableMessage, "device_unrecognized");
   }
   if (!response.ok) {
     throw new DisplayError(`display request failed: ${String(response.status)}`, "display_failed");
