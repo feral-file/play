@@ -214,7 +214,7 @@ codes will not. `pairingErrorMessage(error)` maps them to user-facing text.
 
 | `error.code` | Meaning |
 | :-- | :-- |
-| `pairing_code_expired` | The channel expired before an Art Computer joined (headless `requestEphemeralSession` with no `channelRegenerations`). Press play again for a fresh code. |
+| `pairing_code_expired` | The channel expired before an Art Computer joined (headless `requestEphemeralSession` with no `channelRegenerations`). Try again for a fresh code. |
 | `mint_rejected` | User declined the approval in the mobile app. |
 | `approval_timeout` | No approval within `maxWaitMs` (default 5 minutes) after the Art Computer joined, or every replacement channel expired before one joined. |
 | `session_rejected` | Stored session expired or revoked — the wrapped button clears it; custom integrations clear and re-pair. |
@@ -248,7 +248,7 @@ is fetched directly by the FF1 from the URLs inside the playlist.
 ## Try it against the sample
 
 The [integration sample](../integration/sample) is this exact flow as a
-minimal page — paste a DP-1 payload, press play. From the repo root:
+minimal page — paste a DP-1 payload, press the button. From the repo root:
 
 ```sh
 cd integration && npm ci && npm run sample:dev

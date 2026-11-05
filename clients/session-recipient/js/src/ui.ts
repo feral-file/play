@@ -172,7 +172,7 @@ export function pairingErrorMessage(error: unknown): string {
       case "approval_timeout":
         return "Timed out waiting for your Art Computer. Try again.";
       case "session_rejected":
-        return "The stored browser session was rejected. Pair again.";
+        return "The pairing with your Art Computer has ended. Pair again.";
       case "display_rejected":
         return "Your Art Computer refused the playlist.";
       default:
@@ -471,7 +471,7 @@ async function displayFromButton(
   button.disabled = true;
   button.textContent = options.busyLabel ?? "Preparing...";
   try {
-    setStatus(options, status, "Checking browser session.");
+    setStatus(options, status, "Checking pairing.");
     const brokerBaseUrl = await resolveProvider(options.brokerBaseUrl);
     const storage = resolveUiStorage(options.storage);
     const origin = currentOriginForUi();

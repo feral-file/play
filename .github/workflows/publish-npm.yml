@@ -3,9 +3,10 @@ name: publish-npm
 # Publishes @feralfile/display (clients/session-recipient/js) when a GitHub
 # release is published. This is the 0.4 line (release/0.4): the ff-relayer
 # session path that today's FF OS speaks. Through 0.4.1 the package was
-# @feralfile/play. 0.4.2 is published by hand with an explicit dist-tag,
-# because npm will not move `latest` below the 0.5.0 already published; a
-# later 0.4.x is above `latest` and publishes here as usual. Auth is npm OIDC trusted publishing (same pattern as
+# @feralfile/play. npm refuses to apply `latest` implicitly to a version below
+# the highest one published (0.5.0), so this line publishes with an explicit
+# `--tag latest`: 0.4.x is what sites install until FF OS 3.0 ships. When 0.5.x
+# becomes `latest`, change the tag here to a maintenance tag. Auth is npm OIDC trusted publishing (same pattern as
 # @feralfile/cli): configure the trusted publisher for @feralfile/display on
 # npmjs.org to point at this repo + this workflow file, environment blank.
 #
@@ -95,7 +96,7 @@ jobs:
             echo "No NPM_TOKEN secret: publishing via OIDC trusted publishing."
           fi
 
-          npm publish --access public --provenance
+          npm publish --access public --provenance --tag latest
 
       - name: Attach browser bundle to release
         env:
@@ -118,7 +119,7 @@ jobs:
           SLEEP_SECONDS=10
 
           for attempt in $(seq 1 "$ATTEMPTS"); do
-            NPM_VERSION=$(npm view "@feralfile/display@${TAG}" version)
+            NPM_VERSION=$(npm view "@feralfile/display@${TAG}" version 2>/dev/null || true)
             if [ "$NPM_VERSION" = "$TAG" ]; then
               echo "npm version check passed: $NPM_VERSION"
               exit 0

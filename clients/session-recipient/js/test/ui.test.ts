@@ -16,7 +16,9 @@ import {
   storeEphemeralBrowserSession,
   type PairingDialog,
   type PairingDialogOptions,
-  type PairingMaterial
+  type PairingMaterial,
+  type PlayOnArtComputerButtonHandle,
+  type PlayOnArtComputerButtonOptions
 } from "../src/index.js";
 import { brokerBaseUrl, captureError, expectNoSecrets, fakeBroker, jsonResponse, memoryStorage, requestUrl } from "./fakeBroker.js";
 
@@ -817,10 +819,26 @@ describe("names kept from @feralfile/play", () => {
     expect(error).toBeInstanceOf(DisplayError);
     expect(error.name).toBe("DisplayError");
   });
+
+  it("accepts a 0.4.x site's options and overrides under the old type names", () => {
+    const { document } = fakeDocumentWithContainer();
+    const options: PlayOnArtComputerButtonOptions = {
+      container: "#play-button-container",
+      playlist: { dpVersion: "1.1.0", title: "Legacy Options Playlist", items: [] },
+      brokerBaseUrl: "https://pairing.example",
+      storage: { storage: memoryStorage() },
+      document,
+      buttonLabel: "Send to Art Computer",
+      dialog: { copy: { title: "Send to your Art Computer" } }
+    };
+    const handle: PlayOnArtComputerButtonHandle = mountPlayOnArtComputerButton(options);
+
+    expect(handle.element.textContent).toBe("Send to Art Computer");
+  });
   /* eslint-enable @typescript-eslint/no-deprecated */
 
   it("says display on the button and the dialog, and carries both class sets", () => {
-    const { document } = fakeDocumentWithContainer();
+    const { document, container } = fakeDocumentWithContainer();
     const handle = mountDisplayOnArtComputerButton({
       container: "#play-button-container",
       playlist: { dpVersion: "1.1.0", title: "Class Names Playlist", items: [] },
@@ -836,5 +854,52 @@ describe("names kept from @feralfile/play", () => {
     expect(defaultPairingDialogCopy.approvedStatus).toBe("Approved. Sending the playlist…");
     expect(handle.element.className.split(" ")).toEqual(expect.arrayContaining(["ff-ac-display-button", "ff-ac-play-button", "site-button"]));
     expect(handle.statusElement.className.split(" ")).toEqual(expect.arrayContaining(["ff-ac-display-status", "ff-ac-play-status", "site-status"]));
+    const wrapper = (container as unknown as { children: { className: string }[] }).children[0];
+    expect(wrapper?.className.split(" ")).toEqual(expect.arrayContaining(["ff-ac-display", "ff-ac-play"]));
+  });
+});
+
+describe("a pairing stored by @feralfile/play 0.4.x", () => {
+  it("is read under the same key and sends without pairing again", async () => {
+    const storage = memoryStorage();
+    // The record 0.4.0 writes, with the key spelled out: a change to either
+    // would make every paired site pair again after the rename.
+    storage.setItem(`ff:ephemeral-browser-session:${testOrigin}`, JSON.stringify({
+      token: "browser-session-token",
+      sessionId: "sess_legacy",
+      persistent: true,
+      relayerBaseUrl: "https://relayer.example",
+      origin: testOrigin,
+      storedAt: "2026-10-07T15:56:24.894Z"
+    }));
+    const { document } = fakeDocumentWithContainer();
+    const createDialog = vi.fn(() => {
+      throw new Error("dialog should not be created");
+    });
+    const fetchImpl = vi.fn<typeof fetch>((input) => {
+      expect(requestUrl(input)).toBe("https://relayer.example/api/cast");
+      return Promise.resolve(jsonResponse({ message: { ok: true } }));
+    });
+    let sent = false;
+
+    expect(hasStoredEphemeralBrowserSession(storage, testOrigin)).toBe(true);
+    const handle = mountDisplayOnArtComputerButton({
+      container: "#play-button-container",
+      playlist: { dpVersion: "1.1.0", title: "Legacy Pairing Playlist", items: [] },
+      brokerBaseUrl: "https://pairing.example",
+      storage: { storage },
+      fetchImpl,
+      document,
+      createDialog,
+      onSuccess: () => {
+        sent = true;
+      }
+    });
+    handle.element.click();
+    await nextTick();
+
+    expect(sent).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(createDialog).not.toHaveBeenCalled();
   });
 });
