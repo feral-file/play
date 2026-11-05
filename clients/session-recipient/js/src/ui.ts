@@ -1,7 +1,6 @@
 import qrcode from "qrcode-generator";
 import { displayDp1Playlist, pairingReplacedMessage, tooManyCastsMessage, type DisplayDp1PlaylistOptions, type Dp1Playlist } from "./cast.js";
 import {
-  legacySessionStorageKey,
   readStoredEphemeralBrowserSession,
   requestEphemeralSession,
   validateAppLinkBaseUrl,
@@ -15,6 +14,7 @@ import type { SocketFactory } from "./control/relay-client.js";
 import { DisplayError } from "./errors.js";
 import { deleteStoredDisplayGrant, hasIndexedDb } from "./grantStore.js";
 import type { PairingMaterial } from "./pairingPayload.js";
+import { removeStoredRelayerSession } from "./sessionStore.js";
 
 export type PairingDialogCopy = {
   title: string;
@@ -92,6 +92,12 @@ export type DisplayOnArtComputerButtonOptions = {
   playlist: ValueProvider<Dp1Playlist>;
   brokerBaseUrl: ValueProvider<string>;
   /**
+   * The legacy relayer a relayer session (from an Art Computer on FF OS
+   * without display grants) casts to when the session names none. No default;
+   * see `DisplayDp1PlaylistOptions.relayerBaseUrl`.
+   */
+  relayerBaseUrl?: ValueProvider<string | undefined>;
+  /**
    * Base of the link that brings the visitor's Art Computer to the pairing
    * channel. Defaults to `https://link.feralfile.com/pair`.
    */
@@ -145,7 +151,6 @@ export type PlayOnArtComputerButtonHandle = DisplayOnArtComputerButtonHandle;
 type OptionalBrowserGlobals = {
   document?: Document;
   location?: { origin?: unknown };
-  localStorage?: Pick<Storage, "removeItem">;
 };
 
 const dialogStyleElementId = "ff-art-computer-pairing-ui-style";
@@ -205,16 +210,12 @@ export function pairingErrorMessage(error: unknown): string {
 }
 
 /**
- * Forgets this origin's display grant and keys, without telling the FF1
- * (`unpairArtComputer` does both). Synchronous: the delete is issued and the
- * next read waits behind it. Also drops a 0.4 session record if one is left.
+ * Forgets this origin's pairing, a display grant with its keys or a relayer
+ * session, without telling the FF1 (`unpairArtComputer` also revokes a
+ * grant). Synchronous: the delete is issued and the next read waits behind it.
  */
 export function clearStoredEphemeralBrowserSession(origin: string): void {
-  try {
-    (globalThis as unknown as OptionalBrowserGlobals).localStorage?.removeItem(legacySessionStorageKey(origin));
-  } catch {
-    // Storage access can throw in a sandboxed frame; there is nothing to remove then.
-  }
+  removeStoredRelayerSession(origin);
   if (hasIndexedDb()) {
     void deleteStoredDisplayGrant(origin).catch(() => undefined);
   }
@@ -534,13 +535,14 @@ async function displayFromButton(
       }
     });
     setStatus(options, status, "Sending playlist to Art Computer.");
-    await displayDp1Playlist(displayOptions(options, session, await resolveProvider(options.playlist)));
+    await displayDp1Playlist(displayOptions(options, session, await resolveProvider(options.playlist), await resolveOptionalProvider(options.relayerBaseUrl)));
     setStatus(options, status, "Playlist sent to Art Computer.");
     options.onSuccess?.();
   } catch (error) {
     // session_rejected needs no clearing here: the library already deleted
-    // the rejected grant by its ctl, and an unconditional clear would remove
-    // a newer grant another tab stored meanwhile.
+    // the rejected grant by its ctl (or session by its id), and an
+    // unconditional clear would remove a newer one another tab stored
+    // meanwhile.
     if (error instanceof DisplayError && error.code === "device_unrecognized") {
       state.pairAgain = true;
     }
@@ -555,11 +557,14 @@ async function displayFromButton(
 function displayOptions(
   buttonOptions: DisplayOnArtComputerButtonOptions,
   session: EphemeralBrowserSession,
-  playlist: Dp1Playlist
+  playlist: Dp1Playlist,
+  relayerBaseUrl: string | undefined
 ): DisplayDp1PlaylistOptions {
   return {
     session,
     playlist,
+    ...(relayerBaseUrl === undefined ? {} : { relayerBaseUrl }),
+    ...(buttonOptions.fetchImpl === undefined ? {} : { fetchImpl: buttonOptions.fetchImpl }),
     ...(buttonOptions.socketFactory === undefined ? {} : { socketFactory: buttonOptions.socketFactory }),
     ...(buttonOptions.castTimeoutMs === undefined ? {} : { timeoutMs: buttonOptions.castTimeoutMs })
   };
@@ -579,6 +584,10 @@ async function resolveProvider<T>(provider: ValueProvider<T>): Promise<T> {
     return (provider as () => T | Promise<T>)();
   }
   return provider;
+}
+
+async function resolveOptionalProvider<T>(provider: ValueProvider<T | undefined> | undefined): Promise<T | undefined> {
+  return provider === undefined ? undefined : resolveProvider(provider);
 }
 
 

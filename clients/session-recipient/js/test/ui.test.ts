@@ -7,6 +7,7 @@ import {
   createPairingDialog,
   DisplayError as PublicDisplayError,
   defaultPairingDialogCopy,
+  ephemeralBrowserSessionStorageKey,
   hasStoredEphemeralBrowserSession,
   isTouchDevice,
   mountDisplayOnArtComputerButton,
@@ -29,6 +30,7 @@ import { readStoredDisplayGrant, replaceStoredDisplayGrant } from "../src/grantS
 import { brokerBaseUrl, captureError, expectNoSecrets, fakeBroker } from "./fakeBroker.js";
 import { fakeRelay } from "./fakeRelay.js";
 import { deviceOnRelay, resetIndexedDb, seedGrant } from "./grants.js";
+import { installLocalStorage, uninstallLocalStorage } from "./localStorage.js";
 
 const testOrigin = "https://nft.example";
 let previousLocationDescriptor: PropertyDescriptor | undefined;
@@ -478,7 +480,7 @@ describe("requestEphemeralSessionWithPairingUi", () => {
       fetchImpl: broker.fetchImpl,
       createDialog: dialog.createDialog
     });
-    expect(session.deviceId).toBe("FF1-FIXTURE1");
+    expect(session).toMatchObject({ kind: "displayGrant", deviceId: "FF1-FIXTURE1" });
     expect(dialog.materials[0]?.appLink).toBe("https://link.feralfile.com/pair?channel=ch_1&token=pt_secret_1");
     expect(dialog.events).toEqual([
       "show 123451",
@@ -565,7 +567,7 @@ describe("session UI helpers", () => {
     await expect(requestEphemeralSessionWithPairingUi({
       brokerBaseUrl: "https://pairing.example",
       createDialog
-    })).resolves.toEqual({ deviceId: "FF1-FIXTURE1", ctl: record.ctl, persistent: true });
+    })).resolves.toEqual({ kind: "displayGrant", deviceId: "FF1-FIXTURE1", ctl: record.ctl, persistent: true });
     expect(createDialog).not.toHaveBeenCalled();
   });
 
@@ -582,7 +584,7 @@ describe("session UI helpers", () => {
     await expect(requestEphemeralSessionWithPairingUi({
       brokerBaseUrl: "https://pairing.example",
       requestedExpiresInSeconds: 3600
-    })).resolves.toEqual({ deviceId: "FF1-FIXTURE1", ctl: record.ctl, expiresAt: "2030-01-01T00:00:00.000Z", persistent: false });
+    })).resolves.toEqual({ kind: "displayGrant", deviceId: "FF1-FIXTURE1", ctl: record.ctl, expiresAt: "2030-01-01T00:00:00.000Z", persistent: false });
   });
 });
 
@@ -805,6 +807,69 @@ describe("mountDisplayOnArtComputerButton", () => {
     await secondFailure;
     expect((failures[1] as DisplayError).code).toBe("pairing_canceled");
     expect(handle.element.textContent).toBe("Display on Art Computer");
+  });
+
+  it("casts a stored relayer session to /api/cast, then on 1003 offers Pair again and pairs into a grant", async () => {
+    // A session paired with 2.0.x firmware; the FF1 has since moved to FF OS
+    // with display grants, so the legacy relayer has no device on its topic.
+    const entries = installLocalStorage([[
+      ephemeralBrowserSessionStorageKey(testOrigin),
+      JSON.stringify({ origin: testOrigin, token: "relayer-token-secret", sessionId: "sess_old", persistent: true })
+    ]]);
+    try {
+      const broker = await fakeBroker();
+      const relay = deviceOnRelay({});
+      const casts: string[] = [];
+      const fetchImpl = vi.fn<typeof fetch>((input, init) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.endsWith("/api/cast")) {
+          casts.push(url);
+          return Promise.resolve(new Response(JSON.stringify({ error: { id: 1003 } }), { status: 400 }));
+        }
+        return broker.fetchImpl(input, init);
+      });
+      const { document } = fakeDocumentWithContainer();
+      const failures: unknown[] = [];
+      let succeeded = false;
+      const handle = mountDisplayOnArtComputerButton({
+        container: "#display-button-container",
+        playlist,
+        brokerBaseUrl,
+        relayerBaseUrl: () => "https://relayer.example",
+        pollIntervalMs: 1,
+        fetchImpl,
+        socketFactory: (url) => {
+          for (const grant of broker.issued) {
+            relay.ff1.grants[grant.ctl] = grant.sig;
+          }
+          return relay.socketFactory(url);
+        },
+        document,
+        createDialog: () => ({ show: () => undefined, setStatus: () => undefined, close: () => undefined }),
+        onError: (error) => failures.push(error),
+        onSuccess: () => {
+          succeeded = true;
+        }
+      });
+
+      handle.element.click();
+      await waitFor(() => failures.length > 0);
+      expect(casts).toEqual(["https://relayer.example/api/cast"]);
+      expect(broker.channels).toHaveLength(0);
+      expect((failures[0] as DisplayError).code).toBe("device_unrecognized");
+      expect(handle.element.textContent).toBe("Pair again?");
+      // Kept: an old FF1 that is only off answers the same.
+      expect(entries.size).toBe(1);
+
+      handle.element.click();
+      await waitFor(() => succeeded);
+      expect(entries.size).toBe(0);
+      expect(relay.ff1.seen[0]).toMatchObject({ ctl: broker.issued[0]?.ctl, cmd: "displayPlaylist" });
+      expect(casts).toHaveLength(1);
+      expect(handle.element.textContent).toBe("Display on Art Computer");
+    } finally {
+      uninstallLocalStorage();
+    }
   });
 
   it("reports a canceled pairing without leaking tokens", async () => {

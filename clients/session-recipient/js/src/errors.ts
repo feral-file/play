@@ -12,11 +12,16 @@ export type DisplayErrorCode =
   | "display_failed"
   | "display_rejected"
   | "pairing_canceled"
-  /** The FF1 answered with a session instead of a display grant: it needs an FF OS update. */
+  /** The FF1 refused to issue a display grant (`display_grant_unavailable`, no relay v2 endpoint): it needs an FF OS update. */
   | "device_unsupported"
-  /** The FF1 no longer knows this grant (factory reset or eviction); the visitor decides whether to pair again. */
+  /**
+   * The FF1 no longer knows this grant (factory reset or eviction), or the
+   * legacy relayer has no FF1 for this session (`1003`: an FF1 updated to FF
+   * OS with display grants, or one that is off); the visitor decides whether
+   * to pair again.
+   */
   | "device_unrecognized"
-  /** IndexedDB is unavailable, so the grant and its keys cannot be kept. */
+  /** IndexedDB (or, for a relayer session, `localStorage`) is unavailable, so the pairing cannot be kept. */
   | "storage_unavailable"
   /** The FF1 holds as many paired sites as it allows; the owner removes one first. */
   | "too_many_sites";

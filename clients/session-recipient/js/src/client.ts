@@ -22,6 +22,9 @@ import {
   type StoredDisplayGrant
 } from "./grantStore.js";
 import { algorithm, buildAppLink, defaultAppLinkBaseUrl, type PairingMaterial } from "./pairingPayload.js";
+import { readStoredRelayerSession, removeStoredRelayerSession, storeRelayerSession, type StoredRelayerSession } from "./sessionStore.js";
+
+export { ephemeralBrowserSessionStorageKey } from "./sessionStore.js";
 
 export type BrowserInfo = {
   name?: string;
@@ -30,11 +33,20 @@ export type BrowserInfo = {
 };
 
 /**
- * The pairing this page holds with an Art Computer: a display grant the FF1
- * issued to keys that stay in this origin's IndexedDB. There is no token;
- * every cast is sealed with those keys.
+ * The pairing this page holds with an Art Computer. Its credential stays in
+ * this origin's storage and never appears here.
+ *
+ * - `displayGrant`: an FF1 on FF OS with display grants issued a grant to
+ *   keys that stay in IndexedDB; every cast is sealed with them over relay v2.
+ * - `relayerSession`: an FF1 on older FF OS minted a relayer session; its
+ *   token stays in `localStorage` and casts go to the legacy relayer.
+ *
+ * One pairing request serves both: the FF1 decides which it answers with.
  */
-export type EphemeralBrowserSession = {
+export type EphemeralBrowserSession = DisplayGrantSession | RelayerSession;
+
+export type DisplayGrantSession = {
+  kind: "displayGrant";
   /** The FF1 that issued the grant (its `dev`). */
   deviceId: string;
   /** The grant's controller id, thumb(sig). */
@@ -46,6 +58,16 @@ export type EphemeralBrowserSession = {
   expiresAt?: string;
   /** True when the device owner kept this site paired until removed. */
   persistent: boolean;
+};
+
+export type RelayerSession = {
+  kind: "relayerSession";
+  sessionId: string;
+  /** Absent when the device owner kept this site paired until removed. */
+  expiresAt?: string;
+  persistent: boolean;
+  /** The relayer the FF1 named; casts fall back to the `relayerBaseUrl` option without it. */
+  relayerBaseUrl?: string;
 };
 
 /**
@@ -106,7 +128,6 @@ export type RequestEphemeralSessionOptions = {
 type OptionalBrowserGlobals = {
   location?: { origin?: unknown };
   navigator?: { userAgent?: unknown };
-  localStorage?: Pick<Storage, "removeItem">;
 };
 
 type CreateChannelResponse = {
@@ -146,10 +167,23 @@ type PollMessagesResponse = {
 
 /** The grant as the FF1 returned it, before it is stored with its keys. */
 type DisplayGrantResult = {
+  kind: "displayGrant";
   profile: Awaited<ReturnType<typeof parseProfile>>;
   relayV2Endpoint: string;
   expiresAt: string | undefined;
 };
+
+/** The session older firmware returned, before it is stored. */
+type RelayerSessionResult = {
+  kind: "relayerSession";
+  token: string;
+  sessionId: string;
+  expiresAt: string | undefined;
+  persistent: boolean;
+  relayerBaseUrl: string | undefined;
+};
+
+type MintResult = DisplayGrantResult | RelayerSessionResult;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -377,11 +411,12 @@ const rejectionCodes: Record<string, DisplayErrorCode> = {
 };
 
 /**
- * Parses the FF1's answer. A `mint_succeeded` must carry the display grant
- * issued to `expectedCtl`; one without it comes from firmware that minted a
- * session for the request instead, which this library cannot use.
+ * Parses the FF1's answer. A `mint_succeeded` with `displayGrant` must carry
+ * the grant issued to `expectedCtl`. One without it comes from firmware
+ * without display grants, which decodes the same request leniently, ignores
+ * the keys and mints a relayer session; that session is the result.
  */
-async function parseMintResult(value: unknown, channelId: string, requestMessageId: string, expectedCtl: string): Promise<DisplayGrantResult> {
+async function parseMintResult(value: unknown, channelId: string, requestMessageId: string, expectedCtl: string): Promise<MintResult> {
   if (!isRecord(value) || value["v"] !== 1) {
     throw new Error("mint result invalid");
   }
@@ -411,9 +446,11 @@ async function parseMintResult(value: unknown, channelId: string, requestMessage
     throw new Error("mint result invalid");
   }
   const grant = value["displayGrant"];
+  if (grant === undefined) {
+    return parseRelayerSession(value);
+  }
   if (!isRecord(grant)) {
-    // Older firmware ignores the keys and mints a session; it is discarded.
-    throw new DisplayError("this FF1 needs an FF OS update", "device_unsupported");
+    throw new Error("mint result invalid");
   }
   if (grant["v"] !== 1 || requiredString(grant, "ctl", "mint result invalid") !== expectedCtl) {
     throw new Error("mint result invalid");
@@ -439,7 +476,31 @@ async function parseMintResult(value: unknown, channelId: string, requestMessage
       throw new Error("mint result invalid");
     }
   }
-  return { profile, relayV2Endpoint, expiresAt };
+  return { kind: "displayGrant", profile, relayV2Endpoint, expiresAt };
+}
+
+/**
+ * The session older firmware mints, read as 0.4 read it: under `session`, or
+ * at the top level. It needs an expiry in the future, or the owner-kept
+ * marker when it has none.
+ */
+function parseRelayerSession(value: Record<string, unknown>): RelayerSessionResult {
+  const session = isRecord(value["session"]) ? value["session"] : value;
+  const token = requiredString(session, "token", "mint result invalid");
+  const sessionId = requiredString(session, "sessionId", "mint result invalid");
+  const persistent = session["persistent"] === true;
+  const expiresAt = hasExpiry(session) ? requiredString(session, "expiresAt", "mint result invalid") : undefined;
+  if (expiresAt === undefined) {
+    if (!persistent) {
+      throw new Error("mint result invalid");
+    }
+  } else {
+    const expiresAtMs = Date.parse(expiresAt);
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+      throw new Error("mint result invalid");
+    }
+  }
+  return { kind: "relayerSession", token, sessionId, expiresAt, persistent, relayerBaseUrl: optionalString(session, "relayerBaseUrl") };
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -602,21 +663,9 @@ async function closeChannel(fetcher: typeof fetch, channel: BrowserChannel): Pro
   }
 }
 
-/** Where 0.4 kept its session token; removed on first use so the site re-pairs once. */
-export function legacySessionStorageKey(origin: string): string {
-  return `ff:ephemeral-browser-session:${origin}`;
-}
-
-function removeLegacySession(origin: string): void {
-  try {
-    (globalThis as unknown as OptionalBrowserGlobals).localStorage?.removeItem(legacySessionStorageKey(origin));
-  } catch {
-    // Storage access can throw in a sandboxed frame; there is nothing to remove then.
-  }
-}
-
-function sessionOf(record: StoredDisplayGrant): EphemeralBrowserSession {
+function sessionOf(record: StoredDisplayGrant): DisplayGrantSession {
   return {
+    kind: "displayGrant",
     deviceId: record.deviceId,
     ctl: record.ctl,
     ...(record.expiresAt === undefined ? {} : { expiresAt: record.expiresAt }),
@@ -624,24 +673,34 @@ function sessionOf(record: StoredDisplayGrant): EphemeralBrowserSession {
   };
 }
 
+function relayerSessionOf(record: StoredRelayerSession): RelayerSession {
+  return {
+    kind: "relayerSession",
+    sessionId: record.sessionId,
+    ...(record.expiresAt === undefined ? {} : { expiresAt: record.expiresAt }),
+    persistent: record.persistent === true,
+    ...(record.relayerBaseUrl === undefined ? {} : { relayerBaseUrl: record.relayerBaseUrl })
+  };
+}
+
 /**
- * Reads the grant stored for this origin. An expired grant is dropped from
- * storage, so the next display request re-pairs instead of sealing with keys the FF1
- * will refuse. Resolves to undefined without IndexedDB.
+ * Reads the pairing stored for this origin: the display grant first, then a
+ * relayer session. An expired grant or session is dropped from storage, so
+ * the next display request re-pairs instead of casting with a credential the
+ * FF1 or the relayer will refuse.
  */
 export async function readStoredEphemeralBrowserSession(origin: string): Promise<EphemeralBrowserSession | undefined> {
-  if (!hasIndexedDb()) {
-    return undefined;
+  if (hasIndexedDb()) {
+    const record = await readStoredDisplayGrant(origin);
+    if (record !== undefined) {
+      if (!grantExpired(record)) {
+        return sessionOf(record);
+      }
+      await deleteStoredDisplayGrant(origin, record.ctl);
+    }
   }
-  const record = await readStoredDisplayGrant(origin);
-  if (record === undefined) {
-    return undefined;
-  }
-  if (grantExpired(record)) {
-    await deleteStoredDisplayGrant(origin, record.ctl);
-    return undefined;
-  }
-  return sessionOf(record);
+  const session = readStoredRelayerSession(origin);
+  return session === undefined ? undefined : relayerSessionOf(session);
 }
 
 /** Broker bounds for a pairing channel's idle lifetime, in seconds. */
@@ -787,7 +846,7 @@ async function completeMint(input: {
   mintRequest: AnnouncedMintRequest;
   grantKeys: DisplayGrantKeys;
   maxWaitMs: number;
-}): Promise<DisplayGrantResult> {
+}): Promise<MintResult> {
   const { context, channel, peer, keyPair, browserPublicKeyJwk } = input;
   const { requestMessageId, requestedExpiresInSeconds, requestedAt, displayGrant } = input.mintRequest;
   const mintRequestPlaintext: JsonValue = {
@@ -899,7 +958,9 @@ async function completeMint(input: {
 
 /**
  * Pairs this browser with the visitor's Art Computer and returns the display
- * grant it issued, or the stored one for this origin when it is still valid.
+ * grant (or, from older FF OS, the relayer session) it issued, or the stored
+ * pairing for this origin when one is still valid: a grant first, then a
+ * session.
  *
  * The site creates a pairing channel on the broker and hands the visitor the
  * way in through `onPairingMaterial`: an app link (tap on a phone, QR on a
@@ -921,11 +982,14 @@ export async function requestEphemeralSession(options: RequestEphemeralSessionOp
   if (options.storage === false || !hasIndexedDb()) {
     throw new DisplayError("IndexedDB is required to keep the display grant and its keys", "storage_unavailable");
   }
-  removeLegacySession(origin);
   // Read raw: an expired grant is still revoked once it has been replaced.
   const existing = await readStoredDisplayGrant(origin);
   if (existing !== undefined && !grantExpired(existing)) {
     return sessionOf(existing);
+  }
+  const existingSession = readStoredRelayerSession(origin);
+  if (existingSession !== undefined) {
+    return relayerSessionOf(existingSession);
   }
 
   const signal = options.signal;
@@ -963,7 +1027,7 @@ export async function requestEphemeralSession(options: RequestEphemeralSessionOp
       });
       const peer = await waitForPeer(context, channel, localDeadline);
       options.onPeerJoined?.();
-      const grant = await completeMint({
+      const result = await completeMint({
         context,
         channel,
         peer,
@@ -975,6 +1039,20 @@ export async function requestEphemeralSession(options: RequestEphemeralSessionOp
       });
       // A cancel that lands while the result is decrypted still wins.
       throwIfAborted(signal);
+      if (result.kind === "relayerSession") {
+        const stored: StoredRelayerSession = {
+          origin,
+          token: result.token,
+          sessionId: result.sessionId,
+          ...(result.expiresAt === undefined ? {} : { expiresAt: result.expiresAt }),
+          ...(result.persistent ? { persistent: true } : {}),
+          ...(result.relayerBaseUrl === undefined ? {} : { relayerBaseUrl: result.relayerBaseUrl }),
+          storedAt: new Date().toISOString()
+        };
+        storeRelayerSession(stored);
+        return relayerSessionOf(stored);
+      }
+      const grant = result;
       const record: StoredDisplayGrant = {
         origin,
         deviceId: grant.profile.dev,
@@ -998,6 +1076,9 @@ export async function requestEphemeralSession(options: RequestEphemeralSessionOp
       if (previous !== undefined && !grantExpired(previous)) {
         void revokeDisplayGrant(previous, previous.ctr + 1, options.socketFactory);
       }
+      // A session is stored only while no valid grant is, and a grant always
+      // wins over it: drop it, so it cannot take over once this grant expires.
+      removeStoredRelayerSession(origin);
       return sessionOf(record);
     } catch (error) {
       // Fire and forget: a slow DELETE must not hold up cancel or regeneration.

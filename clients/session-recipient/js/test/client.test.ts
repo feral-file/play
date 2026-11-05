@@ -1,12 +1,10 @@
-import { readFileSync, readdirSync } from "node:fs";
-import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  legacySessionStorageKey,
+  ephemeralBrowserSessionStorageKey,
   maxRequestedExpiresInSeconds,
   readStoredEphemeralBrowserSession,
   requestEphemeralSession,
-  type EphemeralBrowserSession,
+  type DisplayGrantSession,
   type RequestEphemeralSessionOptions
 } from "../src/client.js";
 import { base64UrlDecode, decryptChannelMessage, generateBrowserKeyPair } from "../src/crypto.js";
@@ -26,6 +24,7 @@ import {
   type ResultKind
 } from "./fakeBroker.js";
 import { deviceOnRelay, resetIndexedDb, seedGrant } from "./grants.js";
+import { installLocalStorage, uninstallLocalStorage } from "./localStorage.js";
 
 const testOrigin = "https://nft.example";
 const algorithmName = "P256-HKDF-SHA256-AES-256-GCM";
@@ -65,13 +64,22 @@ function baseOptions(fetchImpl: typeof fetch, overrides: Partial<RequestEphemera
   };
 }
 
+/** Pairs and returns the display grant; any other pairing fails the test. */
+async function requestGrant(options: RequestEphemeralSessionOptions): Promise<DisplayGrantSession> {
+  const session = await requestEphemeralSession(options);
+  if (session.kind !== "displayGrant") {
+    throw new Error(`expected a display grant, got ${session.kind}`);
+  }
+  return session;
+}
+
 /** Runs the happy-path mint flow and returns the session plus the decrypted mint request. */
 async function runMintFlow(input: {
   requestedExpiresInSeconds?: number;
   result?: ResultKind;
-} = {}): Promise<{ session: EphemeralBrowserSession; mintRequest: Record<string, unknown> }> {
+} = {}): Promise<{ session: DisplayGrantSession; mintRequest: Record<string, unknown> }> {
   const broker = await fakeBroker(input.result === undefined ? {} : { result: input.result });
-  const session = await requestEphemeralSession(baseOptions(broker.fetchImpl, {
+  const session = await requestGrant(baseOptions(broker.fetchImpl, {
     ...(input.requestedExpiresInSeconds === undefined ? {} : { requestedExpiresInSeconds: input.requestedExpiresInSeconds })
   }));
   const mintRequest = broker.mintRequests[0]?.plaintext;
@@ -95,7 +103,7 @@ describe("requestEphemeralSession", () => {
       value: receiverCheckedFetch
     });
 
-    const session = await requestEphemeralSession({ brokerBaseUrl, pollIntervalMs: 1 });
+    const session = await requestGrant({ brokerBaseUrl, pollIntervalMs: 1 });
 
     expect(session.deviceId).toBe("FF1-FIXTURE1");
     expect(receiverCheckedFetch).toHaveBeenCalledTimes(5);
@@ -106,7 +114,7 @@ describe("requestEphemeralSession", () => {
     const materials: PairingMaterial[] = [];
     const onPeerJoined = vi.fn();
 
-    const session = await requestEphemeralSession(baseOptions(broker.fetchImpl, {
+    const session = await requestGrant(baseOptions(broker.fetchImpl, {
       browserInfo: { name: "Test Browser", label: "Test Gallery" },
       onPairingMaterial: (material) => {
         expect(onPeerJoined).not.toHaveBeenCalled();
@@ -116,7 +124,7 @@ describe("requestEphemeralSession", () => {
     }));
 
     const issued = broker.issued[0];
-    expect(session).toEqual({ deviceId: "FF1-FIXTURE1", ctl: issued?.ctl, persistent: true });
+    expect(session).toEqual({ kind: "displayGrant", deviceId: "FF1-FIXTURE1", ctl: issued?.ctl, persistent: true });
     const stored = await readStoredDisplayGrant(testOrigin);
     expect(stored).toMatchObject({
       origin: testOrigin,
@@ -265,7 +273,7 @@ describe("requestEphemeralSession", () => {
 
   it("keeps polling through a network failure while waiting for the peer", async () => {
     const broker = await fakeBroker({ networkFailures: 2 });
-    const session = await requestEphemeralSession(baseOptions(broker.fetchImpl));
+    const session = await requestGrant(baseOptions(broker.fetchImpl));
     expect(session.deviceId).toBe("FF1-FIXTURE1");
   });
 
@@ -335,7 +343,7 @@ describe("requestEphemeralSession", () => {
     const realNow = Date.now.bind(Date);
     let skewMs = 0;
     vi.spyOn(Date, "now").mockImplementation(() => realNow() + skewMs);
-    const session = await requestEphemeralSession(baseOptions(broker.fetchImpl, {
+    const session = await requestGrant(baseOptions(broker.fetchImpl, {
       idleTtlSeconds: 15,
       onPairingMaterial: () => {
         skewMs = 16_000;
@@ -355,7 +363,7 @@ describe("requestEphemeralSession", () => {
     const realNow = Date.now.bind(Date);
     let skewMs = 0;
     vi.spyOn(Date, "now").mockImplementation(() => realNow() + skewMs);
-    const session = await requestEphemeralSession(baseOptions(broker.fetchImpl, {
+    const session = await requestGrant(baseOptions(broker.fetchImpl, {
       idleTtlSeconds: 15,
       channelRegenerations: 0,
       onPairingMaterial: () => {
@@ -389,7 +397,7 @@ describe("requestEphemeralSession", () => {
   it("replaces an expired channel with a fresh one and fresh pairing material", async () => {
     const broker = await fakeBroker({ expiredChannels: 1 });
     const materials: PairingMaterial[] = [];
-    const session = await requestEphemeralSession(baseOptions(broker.fetchImpl, {
+    const session = await requestGrant(baseOptions(broker.fetchImpl, {
       channelRegenerations: 2,
       onPairingMaterial: (material) => materials.push(material)
     }));
@@ -482,13 +490,109 @@ describe("requestEphemeralSession", () => {
     expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
   });
 
-  it("throws device_unsupported for a mint_succeeded without a displayGrant and discards the session", async () => {
-    // Firmware without display grants ignores the keys and mints a session.
-    const error = await captureError(runMintFlow({ result: { type: "mint_succeeded", legacySession: true } }));
-    expect((error as DisplayError).code).toBe("device_unsupported");
-    expectNoSecrets(error);
-    expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
-    expect(globalThis.localStorage).toBeUndefined();
+  describe("an Art Computer without display grants", () => {
+    let entries: Map<string, string>;
+    beforeEach(() => {
+      entries = installLocalStorage();
+    });
+    afterEach(() => {
+      uninstallLocalStorage();
+    });
+
+    it("answers the same request with a relayer session, stored under the 0.4 key and returned without its token", async () => {
+      // Firmware without display grants decodes the request leniently, ignores
+      // the keys and mints a session.
+      const broker = await fakeBroker({ result: { type: "mint_succeeded", legacySession: true } });
+      const session = await requestEphemeralSession(baseOptions(broker.fetchImpl));
+
+      expect(session).toEqual({ kind: "relayerSession", sessionId: "sess_123", expiresAt: "2030-01-01T00:00:00.000Z", persistent: false });
+      expect(JSON.stringify(session)).not.toMatch(/secret/);
+      // The one request 0.5 sends: the display-grant keys are in it.
+      expect(broker.mintRequests).toHaveLength(1);
+      expect(broker.mintRequests[0]?.plaintext["displayGrant"]).toBeDefined();
+      expect(JSON.parse(entries.get(ephemeralBrowserSessionStorageKey(testOrigin)) ?? "null")).toMatchObject({
+        origin: testOrigin,
+        token: "browser-session-token-secret",
+        sessionId: "sess_123",
+        expiresAt: "2030-01-01T00:00:00.000Z"
+      });
+      expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
+    });
+
+    it("keeps an owner-kept session with no expiry, and the relayer it names", async () => {
+      const broker = await fakeBroker({
+        result: { type: "mint_succeeded", legacySession: { token: "tok-secret", sessionId: "sess_kept", persistent: true, relayerBaseUrl: "https://relayer.example" } }
+      });
+      const session = await requestEphemeralSession(baseOptions(broker.fetchImpl));
+      expect(session).toEqual({ kind: "relayerSession", sessionId: "sess_kept", persistent: true, relayerBaseUrl: "https://relayer.example" });
+    });
+
+    it.each([
+      { name: "no token", body: { sessionId: "sess_1", expiresAt: "2030-01-01T00:00:00.000Z" } },
+      { name: "no sessionId", body: { token: "tok-secret", expiresAt: "2030-01-01T00:00:00.000Z" } },
+      { name: "an expiry in the past", body: { token: "tok-secret", sessionId: "sess_1", expiresAt: "2000-01-01T00:00:00.000Z" } },
+      { name: "a malformed expiry", body: { token: "tok-secret", sessionId: "sess_1", expiresAt: "soon" } },
+      { name: "no expiry and no owner-kept marker", body: { token: "tok-secret", sessionId: "sess_1" } }
+    ])("rejects a session with $name without storing", async ({ body }) => {
+      const broker = await fakeBroker({ result: { type: "mint_succeeded", legacySession: body } });
+      const error = await captureError(requestEphemeralSession(baseOptions(broker.fetchImpl)));
+      expect((error as Error).message).toBe("mint result invalid");
+      expectNoSecrets(error);
+      expect(entries.size).toBe(0);
+    });
+
+    it("fails with storage_unavailable when the session cannot be stored, without leaking the token", async () => {
+      uninstallLocalStorage();
+      const broker = await fakeBroker({ result: { type: "mint_succeeded", legacySession: true } });
+      const error = await captureError(requestEphemeralSession(baseOptions(broker.fetchImpl)));
+      expect((error as DisplayError).code).toBe("storage_unavailable");
+      expectNoSecrets(error);
+    });
+
+    it("reuses a session 0.4 stored, without pairing", async () => {
+      entries.set(ephemeralBrowserSessionStorageKey(testOrigin), JSON.stringify({ token: "token-secret", sessionId: "sess_old", origin: testOrigin, persistent: true }));
+      const broker = await fakeBroker();
+      const session = await requestEphemeralSession(baseOptions(broker.fetchImpl));
+      expect(session).toEqual({ kind: "relayerSession", sessionId: "sess_old", persistent: true });
+      expect(broker.fetchImpl).not.toHaveBeenCalled();
+    });
+
+    it("prefers a stored grant over a stored session", async () => {
+      entries.set(ephemeralBrowserSessionStorageKey(testOrigin), JSON.stringify({ token: "token-secret", sessionId: "sess_old", origin: testOrigin, persistent: true }));
+      const { record } = await seedGrant(testOrigin);
+      const broker = await fakeBroker();
+      expect(await requestEphemeralSession(baseOptions(broker.fetchImpl))).toEqual({ kind: "displayGrant", deviceId: "FF1-FIXTURE1", ctl: record.ctl, persistent: true });
+      expect(await readStoredEphemeralBrowserSession(testOrigin)).toMatchObject({ kind: "displayGrant", ctl: record.ctl });
+      expect(broker.fetchImpl).not.toHaveBeenCalled();
+    });
+
+    it("falls back to the stored session once the stored grant has expired", async () => {
+      entries.set(ephemeralBrowserSessionStorageKey(testOrigin), JSON.stringify({ token: "token-secret", sessionId: "sess_old", origin: testOrigin, persistent: true }));
+      await seedGrant(testOrigin, { expiresAt: "2000-01-01T00:00:00.000Z", persistent: false });
+      expect(await readStoredEphemeralBrowserSession(testOrigin)).toEqual({ kind: "relayerSession", sessionId: "sess_old", persistent: true });
+      expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
+    });
+
+    it("drops an expired stored session and pairs", async () => {
+      entries.set(ephemeralBrowserSessionStorageKey(testOrigin), JSON.stringify({ token: "token-secret", sessionId: "sess_old", origin: testOrigin, expiresAt: "2000-01-01T00:00:00.000Z" }));
+      const broker = await fakeBroker();
+      const session = await requestGrant(baseOptions(broker.fetchImpl));
+      expect(session.deviceId).toBe("FF1-FIXTURE1");
+      expect(entries.size).toBe(0);
+    });
+
+    it("removes a session another tab stored meanwhile once a grant arrives, so it cannot outlive the grant", async () => {
+      const broker = await fakeBroker();
+      const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+        const response = await broker.fetchImpl(input, init);
+        if (init?.method === "POST" && requestUrl(input).endsWith("/messages")) {
+          entries.set(ephemeralBrowserSessionStorageKey(testOrigin), JSON.stringify({ token: "token-secret", sessionId: "sess_tab", origin: testOrigin, persistent: true }));
+        }
+        return response;
+      });
+      await requestGrant(baseOptions(fetchImpl));
+      expect(entries.size).toBe(0);
+    });
   });
 
   it.each([
@@ -565,7 +669,7 @@ describe("requestEphemeralSession", () => {
   it("collects an answer the Art Computer gave from the announced request before the page sent its copy", async () => {
     const broker = await fakeBroker({ answersFromCreate: true, waitingPolls: 2 });
 
-    const session = await requestEphemeralSession(baseOptions(broker.fetchImpl));
+    const session = await requestGrant(baseOptions(broker.fetchImpl));
 
     expect(session.ctl).toBe(broker.issued[0]?.ctl);
     expect(await readStoredDisplayGrant(testOrigin)).toBeDefined();
@@ -596,7 +700,7 @@ describe("requestEphemeralSession", () => {
 
   it("keeps a timed grant with its expiry", async () => {
     const { session } = await runMintFlow({ result: { type: "mint_succeeded", expiresAt: "2030-01-01T00:00:00.000Z" } });
-    expect(session).toEqual({ deviceId: "FF1-FIXTURE1", ctl: session.ctl, expiresAt: "2030-01-01T00:00:00.000Z", persistent: false });
+    expect(session).toEqual({ kind: "displayGrant", deviceId: "FF1-FIXTURE1", ctl: session.ctl, expiresAt: "2030-01-01T00:00:00.000Z", persistent: false });
     expect(await readStoredEphemeralBrowserSession(testOrigin)).toEqual(session);
   });
 
@@ -605,7 +709,7 @@ describe("requestEphemeralSession", () => {
     { name: "sends a null expiresAt", expiresAt: null }
   ])("keeps an owner-kept grant that $name", async ({ expiresAt }) => {
     const { session } = await runMintFlow({ result: { type: "mint_succeeded", ...(expiresAt === undefined ? {} : { expiresAt }) } });
-    expect(session).toEqual({ deviceId: "FF1-FIXTURE1", ctl: session.ctl, persistent: true });
+    expect(session).toEqual({ kind: "displayGrant", deviceId: "FF1-FIXTURE1", ctl: session.ctl, persistent: true });
     expect(await readStoredEphemeralBrowserSession(testOrigin)).toEqual(session);
   });
 
@@ -738,7 +842,7 @@ describe("requestEphemeralSession", () => {
       }
       return broker.fetchImpl(input, init);
     });
-    const session = await requestEphemeralSession(baseOptions(fetchImpl, {
+    const session = await requestGrant(baseOptions(fetchImpl, {
       channelRegenerations: 1,
       onPairingMaterial: (material) => materials.push(material)
     }));
@@ -760,7 +864,7 @@ describe("requestEphemeralSession", () => {
       }
       return response;
     });
-    const session = await requestEphemeralSession(baseOptions(fetchImpl, { idleTtlSeconds: 15 }));
+    const session = await requestGrant(baseOptions(fetchImpl, { idleTtlSeconds: 15 }));
     expect(session.deviceId).toBe("FF1-FIXTURE1");
   });
 
@@ -797,29 +901,9 @@ describe("requestEphemeralSession", () => {
   it("returns a stored grant without creating a channel", async () => {
     const broker = await fakeBroker();
     const { record } = await seedGrant(testOrigin);
-    const session = await requestEphemeralSession(baseOptions(broker.fetchImpl));
-    expect(session).toEqual({ deviceId: "FF1-FIXTURE1", ctl: record.ctl, persistent: true });
+    const session = await requestGrant(baseOptions(broker.fetchImpl));
+    expect(session).toEqual({ kind: "displayGrant", deviceId: "FF1-FIXTURE1", ctl: record.ctl, persistent: true });
     expect(broker.fetchImpl).not.toHaveBeenCalled();
-  });
-
-  it("removes a stored 0.4 session record on first use, so the site pairs once more", async () => {
-    const entries = new Map<string, string>([
-      [legacySessionStorageKey(testOrigin), JSON.stringify({ token: "token-secret", sessionId: "sess_old", origin: testOrigin })],
-      [legacySessionStorageKey("https://other.example"), "kept"]
-    ]);
-    Object.defineProperty(globalThis, "localStorage", {
-      configurable: true,
-      value: { removeItem: (key: string) => entries.delete(key) }
-    });
-    try {
-      const broker = await fakeBroker();
-      const session = await requestEphemeralSession(baseOptions(broker.fetchImpl));
-      expect(session.deviceId).toBe("FF1-FIXTURE1");
-      expect(broker.channels).toHaveLength(1);
-      expect([...entries.keys()]).toEqual([legacySessionStorageKey("https://other.example")]);
-    } finally {
-      Reflect.deleteProperty(globalThis, "localStorage");
-    }
   });
 
   it("re-pairs past a stored grant's expiry and replaces it without revoking the expired grant", async () => {
@@ -827,7 +911,7 @@ describe("requestEphemeralSession", () => {
     const relay = fakeRelay({ peers: [] });
     const broker = await fakeBroker();
 
-    const session = await requestEphemeralSession(baseOptions(broker.fetchImpl, { socketFactory: relay.socketFactory }));
+    const session = await requestGrant(baseOptions(broker.fetchImpl, { socketFactory: relay.socketFactory }));
 
     expect(session.ctl).not.toBe(old.ctl);
     expect((await readStoredDisplayGrant(testOrigin))?.ctl).toBe(session.ctl);
@@ -888,34 +972,10 @@ describe("requestEphemeralSession", () => {
 
   it("reads back a stored grant by origin and drops an expired one", async () => {
     const { record } = await seedGrant(testOrigin, { expiresAt: "2030-01-01T00:00:00.000Z", persistent: false });
-    expect(await readStoredEphemeralBrowserSession(testOrigin)).toEqual({ deviceId: "FF1-FIXTURE1", ctl: record.ctl, expiresAt: "2030-01-01T00:00:00.000Z", persistent: false });
+    expect(await readStoredEphemeralBrowserSession(testOrigin)).toEqual({ kind: "displayGrant", deviceId: "FF1-FIXTURE1", ctl: record.ctl, expiresAt: "2030-01-01T00:00:00.000Z", persistent: false });
     expect(await readStoredEphemeralBrowserSession("https://other.example")).toBeUndefined();
     await seedGrant(testOrigin, { expiresAt: "2000-01-01T00:00:00.000Z", persistent: false });
     expect(await readStoredEphemeralBrowserSession(testOrigin)).toBeUndefined();
     expect(await readStoredDisplayGrant(testOrigin)).toBeUndefined();
-  });
-});
-
-describe("0.4 transport removal", () => {
-  it("leaves no relayer /api/cast or bearer-token code in the library", () => {
-    const srcDir = path.join(import.meta.dirname, "..", "src");
-    const files: string[] = [];
-    const walk = (dir: string): void => {
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-          walk(full);
-        } else if (entry.name.endsWith(".ts")) {
-          files.push(full);
-        }
-      }
-    };
-    walk(srcDir);
-    for (const file of files) {
-      const text = readFileSync(file, "utf8");
-      expect(text, file).not.toMatch(/\/api\/cast/);
-      expect(text, file).not.toMatch(/Bearer \$\{options\.session/);
-      expect(text, file).not.toMatch(/relayerBaseUrl/);
-    }
   });
 });
