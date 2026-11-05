@@ -1,15 +1,15 @@
-# Play on Art Computer
+# Display on Art Computer
 
-This repository contains everything behind the **Play on Art Computer** action:
-a visitor selects works on a website, presses play, and the works appear on
+This repository contains everything behind the **Display on Art Computer** action:
+a visitor selects works on a website, presses the button, and the works appear on
 their Feral File Art Computer (FF1).
 
 **Integrating a website?** Start with the
 [Integration Guide](docs/integration.md).
 
 Three components make the flow work. A website embeds the
-[`@feralfile/play`](clients/session-recipient/js) browser library. On a play
-with no stored session, the library creates a pairing channel on the **Mint
+[`@feralfile/display`](clients/session-recipient/js) browser library (through
+0.4.1, `@feralfile/play`). On a press with no stored session, the library creates a pairing channel on the **Mint
 Pairing Broker** in [server/](server), a short-lived opaque transport for
 end-to-end encrypted mint request/response messages, and shows the visitor an
 app link (a button on a phone, a QR on a desktop) and a six-digit code. The
@@ -30,12 +30,12 @@ integration surface is pre-1.0: expect additive change, and open issues freely
 
 ## Components
 
-- [clients/session-recipient/js](clients/session-recipient/js/README.md): the `@feralfile/play` browser library websites embed.
+- [clients/session-recipient/js](clients/session-recipient/js/README.md): the `@feralfile/display` browser library websites embed.
 - [server](server/README.md): Go Mint Pairing Broker backed by durable bbolt storage.
 - [clients/ephemeral-token-minter/go](clients/ephemeral-token-minter/go/README.md): Go library used by FF1 `feral-controld` to communicate with the broker, handle E2EE mint request/result payloads, and return encrypted mint results.
 - [integration](integration/README.md): integration tests and the sample website.
 - `.github/workflows/ci.yml`: CI for the broker, browser library, token minter, and integration tests.
-- `.github/workflows/publish-npm.yml`: publishes `@feralfile/play` on GitHub release.
+- `.github/workflows/publish-npm.yml`: publishes `@feralfile/display` on GitHub release.
 - `Dockerfile`: production image for the Mint Pairing Broker.
 
 Go module paths still use the pre-rename repository path

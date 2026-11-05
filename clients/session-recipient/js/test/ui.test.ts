@@ -1,20 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import qrcode from "qrcode-generator";
-import { PlayError } from "../src/errors.js";
+import { DisplayError } from "../src/errors.js";
 import {
   clearStoredEphemeralBrowserSession,
   createPairingDialog,
   defaultPairingDialogCopy,
   hasStoredEphemeralBrowserSession,
   isTouchDevice,
+  mountDisplayOnArtComputerButton,
   mountPlayOnArtComputerButton,
+  PlayError,
   pairingErrorMessage,
   renderQrSvg,
   requestEphemeralSessionWithPairingUi,
   storeEphemeralBrowserSession,
   type PairingDialog,
   type PairingDialogOptions,
-  type PairingMaterial
+  type PairingMaterial,
+  type PlayOnArtComputerButtonHandle,
+  type PlayOnArtComputerButtonOptions
 } from "../src/index.js";
 import { brokerBaseUrl, captureError, expectNoSecrets, fakeBroker, jsonResponse, memoryStorage, requestUrl } from "./fakeBroker.js";
 
@@ -273,18 +277,18 @@ describe("pairing dialog copy", () => {
   });
 
   it("maps pairing and approval failures to bounded user-facing messages", () => {
-    expect(pairingErrorMessage(new PlayError("pairing code expired", "pairing_code_expired"))).toContain("expired");
-    expect(pairingErrorMessage(new PlayError("pairing canceled", "pairing_canceled"))).toBe("Pairing canceled.");
-    expect(pairingErrorMessage(new PlayError("mint request rejected", "mint_rejected"))).toBe("The browser session was not approved in Feral File.");
-    expect(pairingErrorMessage(new PlayError("poll timed out", "approval_timeout"))).toContain("Timed out");
-    expect(pairingErrorMessage(new PlayError("browser session rejected", "session_rejected"))).toContain("Pair again");
+    expect(pairingErrorMessage(new DisplayError("pairing code expired", "pairing_code_expired"))).toBe("The pairing code expired. Try again to get a new one.");
+    expect(pairingErrorMessage(new DisplayError("pairing canceled", "pairing_canceled"))).toBe("Pairing canceled.");
+    expect(pairingErrorMessage(new DisplayError("mint request rejected", "mint_rejected"))).toBe("The browser session was not approved in Feral File.");
+    expect(pairingErrorMessage(new DisplayError("poll timed out", "approval_timeout"))).toBe("Timed out waiting for your Art Computer. Try again.");
+    expect(pairingErrorMessage(new DisplayError("browser session rejected", "session_rejected"))).toContain("Pair again");
     expect(pairingErrorMessage(new Error("channel create failed: 429"))).toBe("channel create failed: 429");
   });
 
   it("names a display refusal and shows display failures as the library words them", () => {
-    expect(pairingErrorMessage(new PlayError("FF1 rejected display request", "display_rejected"))).toBe("Your Art Computer refused the playlist.");
+    expect(pairingErrorMessage(new DisplayError("FF1 rejected display request", "display_rejected"))).toBe("Your Art Computer refused the playlist.");
     const unreachable = "Could not reach your Art Computer. Check that it is on and connected to the internet, then try again.";
-    expect(pairingErrorMessage(new PlayError(unreachable, "display_failed"))).toBe(unreachable);
+    expect(pairingErrorMessage(new DisplayError(unreachable, "display_failed"))).toBe(unreachable);
   });
 });
 
@@ -470,7 +474,7 @@ describe("requestEphemeralSessionWithPairingUi", () => {
       "show 123451",
       "status Waiting for your Art Computer…",
       "status Approve in the Feral File app…",
-      "status Approved. Starting playback…",
+      "status Approved. Sending the playlist…",
       "close"
     ]);
   });
@@ -498,7 +502,7 @@ describe("requestEphemeralSessionWithPairingUi", () => {
       fetchImpl: broker.fetchImpl,
       createDialog: dialog.createDialog
     }));
-    expect((error as PlayError).code).toBe("approval_timeout");
+    expect((error as DisplayError).code).toBe("approval_timeout");
     expectNoSecrets(error);
     expect(dialog.materials).toHaveLength(3);
     expect(dialog.events.at(-1)).toBe("close");
@@ -519,7 +523,7 @@ describe("requestEphemeralSessionWithPairingUi", () => {
     }
     dialog.options[0]?.onCancel();
     const error = await captureError(pending);
-    expect((error as PlayError).code).toBe("pairing_canceled");
+    expect((error as DisplayError).code).toBe("pairing_canceled");
     expect(broker.closed).toEqual(["ch_1"]);
   });
 
@@ -607,7 +611,7 @@ describe("session UI helpers", () => {
   });
 });
 
-describe("mountPlayOnArtComputerButton", () => {
+describe("mountDisplayOnArtComputerButton", () => {
   it("casts with a stored local session without creating the pairing dialog", async () => {
     const storage = memoryStorage();
     storeEphemeralBrowserSession(storage, testOrigin, {
@@ -625,7 +629,7 @@ describe("mountPlayOnArtComputerButton", () => {
       return Promise.resolve(jsonResponse({ message: { ok: true } }));
     });
     let resolved = false;
-    const handle = mountPlayOnArtComputerButton({
+    const handle = mountDisplayOnArtComputerButton({
       container: "#play-button-container",
       playlist: { dpVersion: "1.1.0", title: "Stored Session Playlist", items: [] },
       brokerBaseUrl: "https://pairing.example",
@@ -659,7 +663,7 @@ describe("mountPlayOnArtComputerButton", () => {
       throw new Error("cast should not be attempted");
     });
 
-    expect(() => mountPlayOnArtComputerButton({
+    expect(() => mountDisplayOnArtComputerButton({
       container: "#play-button-container",
       playlist: { dpVersion: "1.1.0", title: "Stored Session Playlist", items: [] },
       brokerBaseUrl: "https://pairing.example",
@@ -685,7 +689,7 @@ describe("mountPlayOnArtComputerButton", () => {
       return Promise.resolve(jsonResponse({ message: { ok: true } }));
     });
     let resolved = false;
-    const handle = mountPlayOnArtComputerButton({
+    const handle = mountDisplayOnArtComputerButton({
       container: "#play-button-container",
       playlist: { dpVersion: "1.1.0", title: "Stored Session Playlist", items: [] },
       brokerBaseUrl: "https://pairing.example",
@@ -708,7 +712,7 @@ describe("mountPlayOnArtComputerButton", () => {
 
   it("refuses to mount with an invalid appLinkBaseUrl", () => {
     const { document } = fakeDocumentWithContainer();
-    expect(() => mountPlayOnArtComputerButton({
+    expect(() => mountDisplayOnArtComputerButton({
       container: "#play-button-container",
       playlist: { dpVersion: "1.1.0", title: "Playlist", items: [] },
       brokerBaseUrl,
@@ -730,7 +734,7 @@ describe("mountPlayOnArtComputerButton", () => {
     let shownLink: string | undefined;
     const statuses: string[] = [];
     let resolved = false;
-    const handle = mountPlayOnArtComputerButton({
+    const handle = mountDisplayOnArtComputerButton({
       container: "#play-button-container",
       playlist: { dpVersion: "1.1.0", title: "Needs Pairing Playlist", items: [] },
       brokerBaseUrl,
@@ -774,7 +778,7 @@ describe("mountPlayOnArtComputerButton", () => {
     let cancel: (() => void) | undefined;
     let failure: unknown;
     const statuses: string[] = [];
-    const handle = mountPlayOnArtComputerButton({
+    const handle = mountDisplayOnArtComputerButton({
       container: "#play-button-container",
       playlist: { dpVersion: "1.1.0", title: "Canceled Playlist", items: [] },
       brokerBaseUrl,
@@ -799,9 +803,103 @@ describe("mountPlayOnArtComputerButton", () => {
     cancel?.();
     await waitFor(() => failure !== undefined);
 
-    expect((failure as PlayError).code).toBe("pairing_canceled");
+    expect((failure as DisplayError).code).toBe("pairing_canceled");
     expectNoSecrets(failure);
     expect(statuses.at(-1)).toBe("Pairing canceled.");
     expect(handle.element.disabled).toBe(false);
+  });
+});
+
+describe("names kept from @feralfile/play", () => {
+  /* eslint-disable @typescript-eslint/no-deprecated -- these tests pin the aliases kept through 0.5.x */
+  it("keeps the play names as the same objects as the display names", () => {
+    expect(mountPlayOnArtComputerButton).toBe(mountDisplayOnArtComputerButton);
+    expect(PlayError).toBe(DisplayError);
+    const error = new PlayError("pairing canceled", "pairing_canceled");
+    expect(error).toBeInstanceOf(DisplayError);
+    expect(error.name).toBe("DisplayError");
+  });
+
+  it("accepts a 0.4.x site's options and overrides under the old type names", () => {
+    const { document } = fakeDocumentWithContainer();
+    const options: PlayOnArtComputerButtonOptions = {
+      container: "#play-button-container",
+      playlist: { dpVersion: "1.1.0", title: "Legacy Options Playlist", items: [] },
+      brokerBaseUrl: "https://pairing.example",
+      storage: { storage: memoryStorage() },
+      document,
+      buttonLabel: "Send to Art Computer",
+      dialog: { copy: { title: "Send to your Art Computer" } }
+    };
+    const handle: PlayOnArtComputerButtonHandle = mountPlayOnArtComputerButton(options);
+
+    expect(handle.element.textContent).toBe("Send to Art Computer");
+  });
+  /* eslint-enable @typescript-eslint/no-deprecated */
+
+  it("says display on the button and the dialog, and carries both class sets", () => {
+    const { document, container } = fakeDocumentWithContainer();
+    const handle = mountDisplayOnArtComputerButton({
+      container: "#play-button-container",
+      playlist: { dpVersion: "1.1.0", title: "Class Names Playlist", items: [] },
+      brokerBaseUrl: "https://pairing.example",
+      storage: { storage: memoryStorage() },
+      document,
+      className: "site-button",
+      statusClassName: "site-status"
+    });
+
+    expect(handle.element.textContent).toBe("Display on Art Computer");
+    expect(defaultPairingDialogCopy.title).toBe("Display on your Art Computer");
+    expect(defaultPairingDialogCopy.approvedStatus).toBe("Approved. Sending the playlist…");
+    expect(handle.element.className.split(" ")).toEqual(expect.arrayContaining(["ff-ac-display-button", "ff-ac-play-button", "site-button"]));
+    expect(handle.statusElement.className.split(" ")).toEqual(expect.arrayContaining(["ff-ac-display-status", "ff-ac-play-status", "site-status"]));
+    const wrapper = (container as unknown as { children: { className: string }[] }).children[0];
+    expect(wrapper?.className.split(" ")).toEqual(expect.arrayContaining(["ff-ac-display", "ff-ac-play"]));
+  });
+});
+
+describe("a pairing stored by @feralfile/play 0.4.x", () => {
+  it("is read under the same key and sends without pairing again", async () => {
+    const storage = memoryStorage();
+    // The record 0.4.0 writes, with the key spelled out: a change to either
+    // would make every paired site pair again after the rename.
+    storage.setItem(`ff:ephemeral-browser-session:${testOrigin}`, JSON.stringify({
+      token: "browser-session-token",
+      sessionId: "sess_legacy",
+      persistent: true,
+      relayerBaseUrl: "https://relayer.example",
+      origin: testOrigin,
+      storedAt: "2026-10-07T15:56:24.894Z"
+    }));
+    const { document } = fakeDocumentWithContainer();
+    const createDialog = vi.fn(() => {
+      throw new Error("dialog should not be created");
+    });
+    const fetchImpl = vi.fn<typeof fetch>((input) => {
+      expect(requestUrl(input)).toBe("https://relayer.example/api/cast");
+      return Promise.resolve(jsonResponse({ message: { ok: true } }));
+    });
+    let sent = false;
+
+    expect(hasStoredEphemeralBrowserSession(storage, testOrigin)).toBe(true);
+    const handle = mountDisplayOnArtComputerButton({
+      container: "#play-button-container",
+      playlist: { dpVersion: "1.1.0", title: "Legacy Pairing Playlist", items: [] },
+      brokerBaseUrl: "https://pairing.example",
+      storage: { storage },
+      fetchImpl,
+      document,
+      createDialog,
+      onSuccess: () => {
+        sent = true;
+      }
+    });
+    handle.element.click();
+    await nextTick();
+
+    expect(sent).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(createDialog).not.toHaveBeenCalled();
   });
 });

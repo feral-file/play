@@ -1,5 +1,5 @@
 import { type JsonValue } from "./canonicalJson.js";
-import { PlayError, type PlayErrorCode } from "./errors.js";
+import { DisplayError, type DisplayErrorCode } from "./errors.js";
 import {
   decryptChannelMessage,
   encryptChannelMessage,
@@ -214,11 +214,11 @@ function requiredJwk(record: Record<string, unknown>, key: string, errorMessage:
 async function jsonResponse(
   response: Response,
   errorPrefix: string,
-  codeByStatus?: Record<number, PlayErrorCode>,
-  defaultCode?: PlayErrorCode
+  codeByStatus?: Record<number, DisplayErrorCode>,
+  defaultCode?: DisplayErrorCode
 ): Promise<unknown> {
   if (!response.ok) {
-    throw new PlayError(`${errorPrefix}: ${String(response.status)}`, codeByStatus?.[response.status] ?? defaultCode);
+    throw new DisplayError(`${errorPrefix}: ${String(response.status)}`, codeByStatus?.[response.status] ?? defaultCode);
   }
   try {
     return await response.json() as unknown;
@@ -387,7 +387,7 @@ function parseSessionPayload(value: unknown, channelId: string, requestMessageId
     throw new Error("mint result invalid");
   }
   if (value["type"] === "mint_rejected") {
-    throw new PlayError("mint request rejected", "mint_rejected");
+    throw new DisplayError("mint request rejected", "mint_rejected");
   }
   if (value["type"] !== "mint_succeeded") {
     throw new Error("mint result invalid");
@@ -576,7 +576,7 @@ export function storeEphemeralBrowserSession(storage: TokenStorage, origin: stri
 /**
  * Reads the session stored for this origin. A record we can no longer use — one
  * that is malformed, expired, or carries no expiry without the `persistent`
- * marker — is dropped from storage, so the next play re-pairs instead of
+ * marker — is dropped from storage, so the next send re-pairs instead of
  * holding a token that will never be sent.
  */
 export function readStoredEphemeralBrowserSession(storage: TokenStorage, origin: string): EphemeralBrowserSession | undefined {
@@ -671,8 +671,8 @@ export function validateAppLinkBaseUrl(value: string | undefined): string {
   return appLinkBaseUrl;
 }
 
-function canceledError(): PlayError {
-  return new PlayError("pairing canceled", "pairing_canceled");
+function canceledError(): DisplayError {
+  return new DisplayError("pairing canceled", "pairing_canceled");
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
@@ -816,7 +816,7 @@ async function completeMint(input: {
     approvalController.abort();
   }
   const deadlineTimer = setTimeout(abortApproval, Math.max(0, input.maxWaitMs));
-  const timedOut = (): PlayError => new PlayError("poll timed out", "approval_timeout");
+  const timedOut = (): DisplayError => new DisplayError("poll timed out", "approval_timeout");
   try {
     try {
       await sendMintRequest({ fetcher: context.fetcher, channel, encrypted: encryptedRequest, signal: approvalController.signal });
@@ -962,8 +962,8 @@ export async function requestEphemeralSession(options: RequestEphemeralSessionOp
           continue;
         }
         throw channelRegenerations === 0
-          ? new PlayError("pairing code expired", "pairing_code_expired")
-          : new PlayError("pairing timed out", "approval_timeout");
+          ? new DisplayError("pairing code expired", "pairing_code_expired")
+          : new DisplayError("pairing timed out", "approval_timeout");
       }
       throw error;
     }
@@ -1008,21 +1008,21 @@ export async function displayDp1Playlist(options: DisplayDp1PlaylistOptions): Pr
       response = await fetcher(castUrl, init);
     } catch (retryError) {
       if (retryError instanceof TypeError) {
-        throw new PlayError(relayerUnreachableMessage, "display_failed");
+        throw new DisplayError(relayerUnreachableMessage, "display_failed");
       }
       throw retryError;
     }
   }
 
   if (response.status === 401 || response.status === 403) {
-    throw new PlayError("browser session rejected", "session_rejected");
+    throw new DisplayError("browser session rejected", "session_rejected");
   }
   if (!response.ok) {
     throw displayFailure(response.status, await relayerErrorId(response));
   }
   const result = await jsonResponse(response, "display request failed", undefined, "display_failed");
   if (extractOk(result) === false) {
-    throw new PlayError("FF1 rejected display request", "display_rejected");
+    throw new DisplayError("FF1 rejected display request", "display_rejected");
   }
 }
 
@@ -1043,19 +1043,19 @@ const relayerSessionStoreBusy = 1008;
 /** How long a failed response's body may take to read before the HTTP status stands in for its error id. */
 const errorBodyReadMs = 2_000;
 
-function displayFailure(status: number, relayerId: number | undefined): PlayError {
+function displayFailure(status: number, relayerId: number | undefined): DisplayError {
   switch (relayerId) {
     case relayerNoArtComputer:
       // No socket on the session's topic. The relayer cannot tell why: the
       // Art Computer may be off, offline, reconnecting, or on a new topic
       // since a reset. So the message names the symptom, not a cause.
-      return new PlayError(artComputerUnreachableMessage, "display_failed");
+      return new DisplayError(artComputerUnreachableMessage, "display_failed");
     case relayerArtComputerTimeout:
-      return new PlayError(artComputerNoAnswerMessage, "display_failed");
+      return new DisplayError(artComputerNoAnswerMessage, "display_failed");
     case relayerSessionStoreBusy:
-      return new PlayError(relayerBusyMessage, "display_failed");
+      return new DisplayError(relayerBusyMessage, "display_failed");
     default:
-      return new PlayError(`Could not send to your Art Computer (error ${String(relayerId ?? status)}). Try again.`, "display_failed");
+      return new DisplayError(`Could not send to your Art Computer (error ${String(relayerId ?? status)}). Try again.`, "display_failed");
   }
 }
 

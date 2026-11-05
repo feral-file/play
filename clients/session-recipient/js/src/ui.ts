@@ -13,7 +13,7 @@ import {
   type TokenStorage,
   type TokenStorageOptions
 } from "./client.js";
-import { PlayError } from "./errors.js";
+import { DisplayError } from "./errors.js";
 import type { PairingMaterial } from "./pairingPayload.js";
 
 export type PairingDialogCopy = {
@@ -87,7 +87,7 @@ export type RequestEphemeralSessionWithPairingUiOptions = PairingPassThroughOpti
 
 export type ValueProvider<T> = T | (() => T | Promise<T>);
 
-export type PlayOnArtComputerButtonOptions = {
+export type DisplayOnArtComputerButtonOptions = {
   container: HTMLElement | string;
   playlist: ValueProvider<Dp1Playlist>;
   brokerBaseUrl: ValueProvider<string>;
@@ -121,11 +121,17 @@ export type PlayOnArtComputerButtonOptions = {
   onError?: (error: unknown) => void;
 };
 
-export type PlayOnArtComputerButtonHandle = {
+export type DisplayOnArtComputerButtonHandle = {
   element: HTMLButtonElement;
   statusElement: HTMLElement;
   destroy: () => void;
 };
+
+/** @deprecated Renamed to `DisplayOnArtComputerButtonOptions`; removed in 0.6.0. */
+export type PlayOnArtComputerButtonOptions = DisplayOnArtComputerButtonOptions;
+
+/** @deprecated Renamed to `DisplayOnArtComputerButtonHandle`; removed in 0.6.0. */
+export type PlayOnArtComputerButtonHandle = DisplayOnArtComputerButtonHandle;
 
 type OptionalBrowserGlobals = {
   document?: Document;
@@ -134,14 +140,14 @@ type OptionalBrowserGlobals = {
 };
 
 const dialogStyleElementId = "ff-art-computer-pairing-ui-style";
-const defaultButtonLabel = "Play on Art Computer";
+const defaultButtonLabel = "Display on Art Computer";
 const svgNamespace = "http://www.w3.org/2000/svg";
 /** Expired channels the wrapped flow replaces before giving up. */
 const wrappedChannelRegenerations = 2;
 const qrQuietZoneModules = 4;
 
 export const defaultPairingDialogCopy: PairingDialogCopy = {
-  title: "Play on your Art Computer",
+  title: "Display on your Art Computer",
   openAppLabel: "Open the Feral File app",
   qrCaption: "Scan with your phone camera or the Feral File app",
   qrLabel: "QR code that opens the Feral File app",
@@ -150,23 +156,23 @@ export const defaultPairingDialogCopy: PairingDialogCopy = {
   copiedHint: "Copied",
   waitingStatus: "Waiting for your Art Computer…",
   approveStatus: "Approve in the Feral File app…",
-  approvedStatus: "Approved. Starting playback…",
+  approvedStatus: "Approved. Sending the playlist…",
   cancelLabel: "Cancel"
 };
 
 export function pairingErrorMessage(error: unknown): string {
-  if (error instanceof PlayError && error.code !== undefined) {
+  if (error instanceof DisplayError && error.code !== undefined) {
     switch (error.code) {
       case "pairing_code_expired":
-        return "The pairing code expired. Press play to get a new one.";
+        return "The pairing code expired. Try again to get a new one.";
       case "pairing_canceled":
         return "Pairing canceled.";
       case "mint_rejected":
         return "The browser session was not approved in Feral File.";
       case "approval_timeout":
-        return "Timed out waiting for your Art Computer. Press play to try again.";
+        return "Timed out waiting for your Art Computer. Try again.";
       case "session_rejected":
-        return "The stored browser session was rejected. Pair again.";
+        return "The pairing with your Art Computer has ended. Pair again.";
       case "display_rejected":
         return "Your Art Computer refused the playlist.";
       default:
@@ -405,29 +411,38 @@ export async function requestEphemeralSessionWithPairingUi(
   }
 }
 
-export function mountPlayOnArtComputerButton(options: PlayOnArtComputerButtonOptions): PlayOnArtComputerButtonHandle {
+/**
+ * Class names the button carries. The `ff-ac-play*` names are kept on the
+ * same elements for sites that style them; they are deprecated and go in
+ * 0.6.0. The default styles target only the `ff-ac-display*` names.
+ */
+const buttonWrapperClassNames = "ff-ac-display ff-ac-play";
+const buttonClassNames = "ff-ac-display-button ff-ac-play-button";
+const buttonStatusClassNames = "ff-ac-display-status ff-ac-play-status";
+
+export function mountDisplayOnArtComputerButton(options: DisplayOnArtComputerButtonOptions): DisplayOnArtComputerButtonHandle {
   validateRequestedExpiresInSeconds(options.requestedExpiresInSeconds);
   validateAppLinkBaseUrl(options.appLinkBaseUrl);
   const ownerDocument = options.document ?? requiredDocument();
   ensureDefaultStyles(ownerDocument);
   const container = resolveContainer(ownerDocument, options.container);
   const wrapper = ownerDocument.createElement("div");
-  wrapper.className = "ff-ac-play";
+  wrapper.className = buttonWrapperClassNames;
 
   const button = ownerDocument.createElement("button");
   button.type = "button";
-  button.className = className("ff-ac-play-button", options.className);
+  button.className = className(buttonClassNames, options.className);
   button.textContent = options.buttonLabel ?? defaultButtonLabel;
 
   const status = ownerDocument.createElement("p");
-  status.className = className("ff-ac-play-status", options.statusClassName);
+  status.className = className(buttonStatusClassNames, options.statusClassName);
   status.setAttribute("aria-live", "polite");
   wrapper.append(button, status);
   container.append(wrapper);
 
   const clickController = new AbortController();
   button.addEventListener("click", () => {
-    void playFromButton(options, ownerDocument, button, status);
+    void displayFromButton(options, ownerDocument, button, status);
   }, { signal: clickController.signal });
 
   return {
@@ -440,8 +455,14 @@ export function mountPlayOnArtComputerButton(options: PlayOnArtComputerButtonOpt
   };
 }
 
-async function playFromButton(
-  options: PlayOnArtComputerButtonOptions,
+/**
+ * @deprecated Renamed to `mountDisplayOnArtComputerButton` with the move from
+ * `@feralfile/play`; removed in 0.6.0. Same function, same options.
+ */
+export const mountPlayOnArtComputerButton = mountDisplayOnArtComputerButton;
+
+async function displayFromButton(
+  options: DisplayOnArtComputerButtonOptions,
   ownerDocument: Document,
   button: HTMLButtonElement,
   status: HTMLElement
@@ -450,7 +471,7 @@ async function playFromButton(
   button.disabled = true;
   button.textContent = options.busyLabel ?? "Preparing...";
   try {
-    setStatus(options, status, "Checking browser session.");
+    setStatus(options, status, "Checking pairing.");
     const brokerBaseUrl = await resolveProvider(options.brokerBaseUrl);
     const storage = resolveUiStorage(options.storage);
     const origin = currentOriginForUi();
@@ -477,7 +498,7 @@ async function playFromButton(
     setStatus(options, status, "Playlist sent to Art Computer.");
     options.onSuccess?.();
   } catch (error) {
-    if (error instanceof PlayError && error.code === "session_rejected") {
+    if (error instanceof DisplayError && error.code === "session_rejected") {
       const storage = resolveUiStorage(options.storage);
       if (storage !== undefined) {
         clearStoredEphemeralBrowserSession(storage, currentOriginForUi());
@@ -492,7 +513,7 @@ async function playFromButton(
 }
 
 function displayOptions(
-  buttonOptions: PlayOnArtComputerButtonOptions,
+  buttonOptions: DisplayOnArtComputerButtonOptions,
   session: EphemeralBrowserSession,
   playlist: Dp1Playlist,
   relayerBaseUrl: string | undefined
@@ -509,7 +530,7 @@ function defaultButtonBrowserInfo(ownerDocument: Document): BrowserInfo {
   return ownerDocument.title.length > 0 ? { label: ownerDocument.title } : {};
 }
 
-function setStatus(options: PlayOnArtComputerButtonOptions, status: HTMLElement, message: string): void {
+function setStatus(options: DisplayOnArtComputerButtonOptions, status: HTMLElement, message: string): void {
   status.textContent = message;
   options.onStatusChange?.(message);
 }
@@ -644,7 +665,7 @@ function ensureDefaultStyles(ownerDocument: Document): void {
 .ff-ac-pairing-code-label,
 .ff-ac-pairing-copy-hint,
 .ff-ac-pairing-status,
-.ff-ac-play-status {
+.ff-ac-display-status {
   line-height: 1.5;
 }
 .ff-ac-pairing-caption,
@@ -680,14 +701,14 @@ function ensureDefaultStyles(ownerDocument: Document): void {
   width: 100%;
 }
 .ff-ac-pairing-secondary,
-.ff-ac-play-button {
+.ff-ac-display-button {
   min-height: 42px;
   border-radius: 6px;
   padding: 0 16px;
   font-weight: 800;
   cursor: pointer;
 }
-.ff-ac-play-button {
+.ff-ac-display-button {
   border: 1px solid #df3f2d;
   background: #df3f2d;
   color: #ffffff;
@@ -697,16 +718,16 @@ function ensureDefaultStyles(ownerDocument: Document): void {
   background: #ffffff;
   color: #2b2a27;
 }
-.ff-ac-play-button:disabled {
+.ff-ac-display-button:disabled {
   cursor: wait;
   border-color: #8f8b83;
   background: #8f8b83;
 }
-.ff-ac-play {
+.ff-ac-display {
   display: inline-grid;
   gap: 10px;
 }
-.ff-ac-play-status {
+.ff-ac-display-status {
   min-height: 20px;
   margin: 0;
   color: currentColor;

@@ -12,9 +12,9 @@
         <div class="flex flex-wrap items-end justify-between gap-4">
           <div>
             <p class="text-xs font-semibold uppercase tracking-normal text-red-400">NFT display website sample</p>
-            <h1 class="mt-2 text-3xl font-semibold tracking-normal text-neutral-50">FF1 DP1 playback</h1>
+            <h1 class="mt-2 text-3xl font-semibold tracking-normal text-neutral-50">Display a DP1 playlist on FF1</h1>
           </div>
-          <div id="play-button-container"></div>
+          <div id="display-button-container"></div>
         </div>
 
         <div class="grid max-w-2xl gap-4">
@@ -75,8 +75,8 @@
       import {
         clearStoredEphemeralBrowserSession,
         hasStoredEphemeralBrowserSession,
-        mountPlayOnArtComputerButton
-      } from "@feralfile/play";
+        mountDisplayOnArtComputerButton
+      } from "@feralfile/display";
 
       const brokerUrlInput = mustElement("broker-url");
       const appLinkBaseUrlInput = mustElement("app-link-base-url");
@@ -109,14 +109,14 @@
         }
       }
 
-      let playButton;
+      let displayButton;
 
-      function mountPlayButton() {
-        const previous = playButton;
+      function mountDisplayButton() {
+        const previous = displayButton;
         // Mount first: an invalid app link base URL throws here and leaves the
         // current button in place.
-        playButton = mountPlayOnArtComputerButton({
-          container: "#play-button-container",
+        displayButton = mountDisplayOnArtComputerButton({
+          container: "#display-button-container",
           playlist: dp1Payload,
           brokerBaseUrl: () => brokerUrlInput.value.trim(),
           appLinkBaseUrl: appLinkBaseUrlInput.value.trim(),
@@ -141,14 +141,14 @@
       // The app link base URL is fixed when the button mounts, so remount on change.
       appLinkBaseUrlInput.addEventListener("change", () => {
         try {
-          mountPlayButton();
+          mountDisplayButton();
           setMessage("App link base URL updated.");
         } catch (error) {
           setMessage(error instanceof Error ? error.message : "Invalid app link base URL.");
         }
       });
 
-      mountPlayButton();
+      mountDisplayButton();
 
       forgetButton.addEventListener("click", () => {
         clearStoredEphemeralBrowserSession(localStorage, window.location.origin);

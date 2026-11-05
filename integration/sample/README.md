@@ -10,7 +10,7 @@ npm ci
 npm run sample:dev
 ```
 
-Open the printed local URL, paste a DP1 JSON payload, and press **Play on Art Computer**. The broker defaults to `https://handoff.feralfile.com` and the app link to `https://link.feralfile.com/pair`.
+Open the printed local URL, paste a DP1 JSON payload, and press **Display on Art Computer**. The broker defaults to `https://handoff.feralfile.com` and the app link to `https://link.feralfile.com/pair`.
 
 If this website origin has no stored browser session, the button creates a pairing channel on the broker and opens the pairing dialog:
 

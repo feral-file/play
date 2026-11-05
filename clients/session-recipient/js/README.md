@@ -1,9 +1,9 @@
-# @feralfile/play
+# @feralfile/display
 
-`clients/session-recipient/js/` is `@feralfile/play`, the browser library websites embed to pair a visitor's browser with their Art Computer and play a DP-1 playlist on it. Internally it is the mint-pairing requester: the browser client that requests an ephemeral browser session from the Go token minter embedded in FF1 `feral-controld`.
+`clients/session-recipient/js/` is `@feralfile/display`, the browser library websites embed to pair a visitor's browser with their Art Computer and display a DP-1 playlist on it. Through 0.4.1 it was published as `@feralfile/play`; see [Renamed from @feralfile/play](#renamed-from-feralfileplay). Internally it is the mint-pairing requester: the browser client that requests an ephemeral browser session from the Go token minter embedded in FF1 `feral-controld`.
 
 ```sh
-npm i @feralfile/play
+npm i @feralfile/display
 ```
 
 The published package ships compiled ESM + type declarations from `dist/` (`npm run build`). Source stays TypeScript-first in `src/`.
@@ -14,7 +14,7 @@ Browser runtimes check `localStorage` under the current website origin for an ex
 import {
   displayDp1Playlist,
   requestEphemeralSession
-} from "@feralfile/play";
+} from "@feralfile/display";
 
 const session = await requestEphemeralSession({
   brokerBaseUrl: "https://handoff.feralfile.com",
@@ -33,17 +33,17 @@ await displayDp1Playlist({
 
 ## Wrapped Pairing UI
 
-For a standard integration, mount the provided **Play on Art Computer** button.
+For a standard integration, mount the provided **Display on Art Computer** button.
 It checks origin-scoped storage first, opens the pairing dialog only when
 there is no valid local browser session, waits for the Art Computer to join
 and the owner to approve in the app, and then sends the DP1 playlist to
 `ff-relayer`.
 
 ```ts
-import { mountPlayOnArtComputerButton } from "@feralfile/play";
+import { mountDisplayOnArtComputerButton } from "@feralfile/display";
 
-mountPlayOnArtComputerButton({
-  container: "#play-on-art-computer",
+mountDisplayOnArtComputerButton({
+  container: "#display-on-art-computer",
   playlist: dp1Playlist,
   brokerBaseUrl: "https://handoff.feralfile.com",
   // Optional; this is the default.
@@ -69,7 +69,7 @@ page with the bundled `qrcode-generator` (no image request), captioned "Scan
 with your phone camera or the Feral File app", with the code below. A status
 line reads "Waiting for your Art Computer…" and then "Approve in the Feral
 File app…". If the channel expires before an Art Computer joins, the dialog
-shows fresh material, up to twice, and then the play fails with
+shows fresh material, up to twice, and then the send fails with
 `approval_timeout`.
 
 For custom UI, use `createPairingDialog`,
@@ -85,6 +85,35 @@ is gone because the site now starts pairing; `requestEphemeralSession` takes
 now `createPairingDialog`, and the error codes `pairing_code_not_found` and
 `pairing_code_used` no longer exist. The wrapped button is unchanged apart
 from the new optional `appLinkBaseUrl`.
+
+## Renamed from @feralfile/play
+
+The verb for putting art on a display is display, so the package is
+`@feralfile/display` from 0.4.2 and the button reads **Display on Art
+Computer**. 0.4.2 is the 0.4.1 library under its new name: it works with the
+FF OS on Art Computers today, and a site that is already paired stays paired.
+`@feralfile/play` stops at 0.4.1. To move, change the dependency and the
+import specifier. The old names keep working as deprecated aliases through
+0.5.x and go in 0.6.0:
+
+| Deprecated | Use |
+| :-- | :-- |
+| `mountPlayOnArtComputerButton` | `mountDisplayOnArtComputerButton` |
+| `PlayOnArtComputerButtonOptions` | `DisplayOnArtComputerButtonOptions` |
+| `PlayOnArtComputerButtonHandle` | `DisplayOnArtComputerButtonHandle` |
+| `PlayError` | `DisplayError` (the same class: `instanceof PlayError` still matches) |
+| `PlayErrorCode` | `DisplayErrorCode` |
+| CSS classes `ff-ac-play`, `ff-ac-play-button`, `ff-ac-play-status` | `ff-ac-display`, `ff-ac-display-button`, `ff-ac-display-status` (the button carries both; the default styles use only the new ones) |
+
+What reads differently: the default button label is "Display on Art
+Computer", the dialog title "Display on your Art Computer", the approved
+status "Approved. Sending the playlist…", the messages that told the visitor
+to press play say try again, and an error's `name` is `"DisplayError"`.
+`buttonLabel` and `dialog.copy` overrides work as before, and error codes are
+unchanged. The self-hosted bundle is `display.js`.
+
+0.5.0 sends over relay v2 with display grants, which need FF OS 3.0. Stay on
+0.4.x until the Art Computers your visitors own run it.
 
 ## Commands
 
