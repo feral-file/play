@@ -557,6 +557,22 @@ describe("requestEphemeralSession", () => {
       expect(broker.fetchImpl).not.toHaveBeenCalled();
     });
 
+    it("returns a stored session when IndexedDB refuses to open; only a new pairing needs it", async () => {
+      entries.set(ephemeralBrowserSessionStorageKey(testOrigin), JSON.stringify({ token: "token-secret", sessionId: "sess_old", origin: testOrigin, persistent: true }));
+      Object.defineProperty(globalThis, "indexedDB", {
+        configurable: true,
+        value: { open: () => { throw new DOMException("blocked", "SecurityError"); } }
+      });
+      const broker = await fakeBroker();
+      const expected = { kind: "relayerSession", sessionId: "sess_old", persistent: true };
+      expect(await requestEphemeralSession(baseOptions(broker.fetchImpl))).toEqual(expected);
+      expect(await readStoredEphemeralBrowserSession(testOrigin)).toEqual(expected);
+      entries.clear();
+      expect((await captureError(requestEphemeralSession(baseOptions(broker.fetchImpl))) as DisplayError).code).toBe("storage_unavailable");
+      expect(await readStoredEphemeralBrowserSession(testOrigin)).toBeUndefined();
+      expect(broker.fetchImpl).not.toHaveBeenCalled();
+    });
+
     it("returns a stored session without IndexedDB; only a new pairing needs it", async () => {
       entries.set(ephemeralBrowserSessionStorageKey(testOrigin), JSON.stringify({ token: "token-secret", sessionId: "sess_old", origin: testOrigin, persistent: true }));
       removeIndexedDb();

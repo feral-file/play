@@ -690,17 +690,36 @@ function relayerSessionOf(record: StoredRelayerSession): RelayerSession {
  * FF1 or the relayer will refuse.
  */
 export async function readStoredEphemeralBrowserSession(origin: string): Promise<EphemeralBrowserSession | undefined> {
-  if (hasIndexedDb()) {
-    const record = await readStoredDisplayGrant(origin);
-    if (record !== undefined) {
-      if (!grantExpired(record)) {
-        return sessionOf(record);
-      }
-      await deleteStoredDisplayGrant(origin, record.ctl);
+  const { record } = await readGrantStore(origin);
+  if (record !== undefined) {
+    if (!grantExpired(record)) {
+      return sessionOf(record);
     }
+    await deleteStoredDisplayGrant(origin, record.ctl);
   }
   const session = readStoredRelayerSession(origin);
   return session === undefined ? undefined : relayerSessionOf(session);
+}
+
+/**
+ * Reads the origin's grant, raw (expired or not). `usable` is false when the
+ * grant store cannot be used at all: no IndexedDB, or one that refuses to open
+ * (a SecurityError in a sandboxed or storage-blocked frame). A stored relayer
+ * session lives in localStorage and is still read then; only a new pairing
+ * needs the grant store. Any other failure (a corrupt record) still throws.
+ */
+async function readGrantStore(origin: string): Promise<{ usable: boolean; record: StoredDisplayGrant | undefined }> {
+  if (!hasIndexedDb()) {
+    return { usable: false, record: undefined };
+  }
+  try {
+    return { usable: true, record: await readStoredDisplayGrant(origin) };
+  } catch (error) {
+    if (error instanceof DisplayError && error.code === "storage_unavailable") {
+      return { usable: false, record: undefined };
+    }
+    throw error;
+  }
 }
 
 /** Broker bounds for a pairing channel's idle lifetime, in seconds. */
@@ -992,7 +1011,8 @@ export async function requestEphemeralSession(
     throw new DisplayError("IndexedDB is required to keep the display grant and its keys", "storage_unavailable");
   }
   // Read raw: an expired grant is still revoked once it has been replaced.
-  const existing = hasIndexedDb() ? await readStoredDisplayGrant(origin) : undefined;
+  const grantStore = await readGrantStore(origin);
+  const existing = grantStore.record;
   if (existing !== undefined && !grantExpired(existing)) {
     return sessionOf(existing);
   }
@@ -1001,7 +1021,7 @@ export async function requestEphemeralSession(
     return relayerSessionOf(existingSession);
   }
   // Only a new pairing needs IndexedDB: its grant keys are stored there.
-  if (!hasIndexedDb()) {
+  if (!grantStore.usable) {
     throw new DisplayError("IndexedDB is required to keep the display grant and its keys", "storage_unavailable");
   }
 

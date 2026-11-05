@@ -334,6 +334,31 @@ describe("displayDp1Playlist with a relayer session", () => {
     expect((error as DisplayError).code).toBe("display_rejected");
   });
 
+  it("fails with display_failed at timeoutMs when the relayer answers late, even if fetch ignores the abort", async () => {
+    const late = vi.fn<typeof fetch>(() => new Promise((resolve) => setTimeout(() => {
+      resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    }, 250)));
+    const started = Date.now();
+    const error = await captureError(displayDp1Playlist({ session: relayerSession, playlist, relayerBaseUrl: "https://relayer.example", fetchImpl: late, timeoutMs: 20 }));
+    expect((error as DisplayError).code).toBe("display_failed");
+    expect(Date.now() - started).toBeLessThan(200);
+    expect(late.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+    expect(entries.has(ephemeralBrowserSessionStorageKey(testOrigin))).toBe(true);
+  });
+
+  it("holds one deadline over the retry and the body read", async () => {
+    // First attempt fails at once, the retry answers with a body that never ends.
+    const stalledBody = new Response(new ReadableStream({ start: () => undefined }), { status: 200 });
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce(stalledBody);
+    const started = Date.now();
+    const error = await captureError(displayDp1Playlist({ session: relayerSession, playlist, relayerBaseUrl: "https://relayer.example", fetchImpl, timeoutMs: 30 }));
+    expect((error as DisplayError).code).toBe("display_failed");
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(Date.now() - started).toBeLessThan(200);
+  });
+
   it("retries once after a network failure", async () => {
     const answer = relayerAnswer(200, { ok: true });
     const fetchImpl = vi.fn<typeof fetch>()

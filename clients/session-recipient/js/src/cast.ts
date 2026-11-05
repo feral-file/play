@@ -10,7 +10,11 @@ export type Dp1Playlist = Record<string, unknown>;
 export type DisplayDp1PlaylistOptions = {
   session: EphemeralBrowserSession;
   playlist: Dp1Playlist;
-  /** Deadline for the whole relay round trip, connecting included. Default 30 s, plus about a second per 24 KB of playlist over 32 KB. */
+  /**
+   * Deadline for the whole relay round trip, connecting included (for a
+   * relayer session: the request, its one retry and reading the answer).
+   * Default 30 s, plus about a second per 24 KB of playlist over 32 KB.
+   */
   timeoutMs?: number;
   /** Opens the relay WebSocket; defaults to the browser's `WebSocket`. */
   socketFactory?: SocketFactory;
@@ -304,35 +308,60 @@ async function castWithRelayerSession(options: DisplayDp1PlaylistOptions, sessio
   }
   const castUrl = new URL("/api/cast", new URL(relayerBaseUrl).toString().replace(/\/$/, ""));
   const fetcher = options.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
+  const req = { intent: { action: "now_display" }, dp1_call: options.playlist };
+  // One deadline, as for a grant's cast, over the request, its retry and the
+  // body read. Each step races it, so a fetch that ignores the abort signal
+  // still cannot hold the cast past it.
+  const controller = new AbortController();
+  const timedOut = (): DisplayError => new DisplayError("the relayer did not answer in time", "display_failed");
+  const pastDeadline = (): boolean => controller.signal.aborted;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(timedOut());
+    }, options.timeoutMs ?? castDeadline(req));
+  });
+  deadline.catch(() => undefined);
+  const beforeDeadline = <T>(step: Promise<T>): Promise<T> => Promise.race([step, deadline]);
   const init: RequestInit = {
     method: "POST",
     headers: { authorization: `Bearer ${stored.token}`, "content-type": "application/json" },
-    body: JSON.stringify({
-      command: "displayPlaylist",
-      request: { intent: { action: "now_display" }, dp1_call: options.playlist }
-    })
+    body: JSON.stringify({ command: "displayPlaylist", request: req }),
+    signal: controller.signal
   };
   let response: Response;
+  let body: unknown;
   try {
-    response = await fetcher(castUrl, init);
-  } catch (error) {
-    // A page returning to the foreground can lose its first request to a
-    // network that is still waking up. One retry covers that; a second
-    // failure is real. Re-sending is safe: the cast replaces what is showing.
-    if (!(error instanceof TypeError)) {
-      throw error;
-    }
     try {
-      response = await fetcher(castUrl, init);
-    } catch {
-      throw new DisplayError("the relayer is unreachable", "display_failed");
+      response = await beforeDeadline(fetcher(castUrl, init));
+    } catch (error) {
+      if (pastDeadline()) {
+        throw timedOut();
+      }
+      // A page returning to the foreground can lose its first request to a
+      // network that is still waking up. One retry covers that; a second
+      // failure is real. Re-sending is safe: the cast replaces what is showing.
+      if (!(error instanceof TypeError)) {
+        throw error;
+      }
+      try {
+        response = await beforeDeadline(fetcher(castUrl, init));
+      } catch {
+        if (pastDeadline()) {
+          throw timedOut();
+        }
+        throw new DisplayError("the relayer is unreachable", "display_failed");
+      }
     }
+    if (response.status === 401 || response.status === 403) {
+      removeStoredRelayerSession(origin, stored.sessionId);
+      throw new DisplayError("browser session rejected", "session_rejected");
+    }
+    body = await beforeDeadline(readJson(response));
+  } finally {
+    clearTimeout(timer);
   }
-  if (response.status === 401 || response.status === 403) {
-    removeStoredRelayerSession(origin, stored.sessionId);
-    throw new DisplayError("browser session rejected", "session_rejected");
-  }
-  const body = await readJson(response);
   if (response.status === 400 && relayerErrorId(body) === relayerNoDeviceErrorId) {
     // Never cleared here: an old FF1 that is only offline answers the same,
     // and its session still works once it is back. Only the visitor's
