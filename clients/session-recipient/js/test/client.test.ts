@@ -1014,7 +1014,7 @@ describe("displayDp1Playlist", () => {
   // ff-relayer answers a failed cast with { error: { id, message } }; the
   // visitor sees what the id means, never "display request failed: 400".
   it.each([
-    [400, { error: { id: 1003, message: "not found" } }, "Your Art Computer is offline. Check that it is on and connected to the internet, then try again."],
+    [400, { error: { id: 1003, message: "not found" } }, "Could not reach your Art Computer. Check that it is on and connected to the internet, then try again."],
     [400, { error: { id: 1004, message: "TV is not responding" } }, "Your Art Computer did not answer. Try again in a moment."],
     [503, { error: { id: 1008, message: "ephemeral session store busy" } }, "Feral File could not send this right now. Try again in a moment."],
     [400, { error: { id: 1001, message: "invalid data" } }, "Could not send to your Art Computer (error 1001). Try again."]
@@ -1044,6 +1044,30 @@ describe("displayDp1Playlist", () => {
     expect((error as PlayError).code).toBe("display_failed");
     expect((error as PlayError).message).toBe("Could not send to your Art Computer (error 502). Try again.");
     expect((error as PlayError).message).not.toContain("Bad gateway");
+  });
+
+  it("falls back to the HTTP status when a failed response's body stalls", async () => {
+    // A body that never ends must not hold the button busy: the error-id read
+    // gives up after its bound and the status stands in.
+    const fetchImpl = vi.fn<typeof fetch>(() => Promise.resolve(new Response(new ReadableStream(), { status: 503 })));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const state = { settled: false };
+    const pending = captureError(displayDp1Playlist({
+      session: { token: "browser-session-token", sessionId: "sess_123", expiresAt: "2030-01-01T00:00:00.000Z", relayerBaseUrl: "https://relayer.example" },
+      playlist: { dpVersion: "1.1.0", title: "Browser Playlist", items: [] },
+      fetchImpl
+    })).finally(() => {
+      state.settled = true;
+    });
+    for (let step = 0; step < 50 && !state.settled; step += 1) {
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    vi.useRealTimers();
+    expect(state.settled).toBe(true);
+    const error = await pending;
+    expect(error).toBeInstanceOf(PlayError);
+    expect((error as PlayError).code).toBe("display_failed");
+    expect((error as PlayError).message).toBe("Could not send to your Art Computer (error 503). Try again.");
   });
 
   it("requires a relayer URL", async () => {

@@ -283,8 +283,8 @@ describe("pairing dialog copy", () => {
 
   it("names a display refusal and shows display failures as the library words them", () => {
     expect(pairingErrorMessage(new PlayError("FF1 rejected display request", "display_rejected"))).toBe("Your Art Computer refused the playlist.");
-    const offline = "Your Art Computer is offline. Check that it is on and connected to the internet, then try again.";
-    expect(pairingErrorMessage(new PlayError(offline, "display_failed"))).toBe(offline);
+    const unreachable = "Could not reach your Art Computer. Check that it is on and connected to the internet, then try again.";
+    expect(pairingErrorMessage(new PlayError(unreachable, "display_failed"))).toBe(unreachable);
   });
 });
 
