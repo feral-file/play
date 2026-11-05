@@ -342,8 +342,8 @@ Moving from `@feralfile/play` 0.4 means changing the package name and import
 specifier and taking the 0.5 changes below, less what 0.6 brings back. The `Play` names
 (`mountPlayOnArtComputerButton`, `PlayOnArtComputerButtonOptions`,
 `PlayOnArtComputerButtonHandle`, `PlayError`, `PlayErrorCode`, and the
-`ff-ac-play*` CSS classes) keep working in 0.5.x as deprecated aliases of the
-`Display` names and go in 0.6.0; the library's
+`ff-ac-play*` CSS classes) were deprecated aliases of the `Display` names in
+0.5.x and are gone in 0.6.0; the library's
 [README](../clients/session-recipient/js/README.md#renamed-from-feralfileplay)
 lists them. The default button label is "Display on Art Computer" and an
 error's `name` is `"DisplayError"`.

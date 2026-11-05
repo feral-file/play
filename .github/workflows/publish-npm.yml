@@ -116,10 +116,7 @@ jobs:
 
           npm run build
           npm run bundle
-          # 0.5.x also attaches the bundle under its old name, play.js, for
-          # sites that fetch it by that name; drop the copy in 0.6.0.
-          cp dist/display.js dist/play.js
-          gh release upload "${{ github.event.release.tag_name }}" dist/display.js dist/play.js \
+          gh release upload "${{ github.event.release.tag_name }}" dist/display.js \
             --clobber --repo "${{ github.repository }}"
 
       - name: Verify npm package version

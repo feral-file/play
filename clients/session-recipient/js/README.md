@@ -110,23 +110,23 @@ The verb for putting art on a display is display, not play, so the package is
 `@feralfile/display` from 0.5.0 and the button reads **Display on Art
 Computer**. `@feralfile/play` stops at 0.4.0. To move, change the dependency
 and the import specifier, then follow [Upgrading from 0.4.x](#upgrading-from-04x).
-The old names keep working in 0.5.x as deprecated aliases and go in 0.6.0:
+The old names were deprecated aliases in 0.5.x and are gone in 0.6.0:
 
-| Deprecated (0.5.x) | Use |
+| Removed in 0.6.0 | Use |
 | :-- | :-- |
 | `mountPlayOnArtComputerButton` | `mountDisplayOnArtComputerButton` |
 | `PlayOnArtComputerButtonOptions` | `DisplayOnArtComputerButtonOptions` |
 | `PlayOnArtComputerButtonHandle` | `DisplayOnArtComputerButtonHandle` |
-| `PlayError` | `DisplayError` (the same class: `instanceof PlayError` still matches) |
+| `PlayError` | `DisplayError` |
 | `PlayErrorCode` | `DisplayErrorCode` |
-| CSS classes `ff-ac-play`, `ff-ac-play-button`, `ff-ac-play-status` | `ff-ac-display`, `ff-ac-display-button`, `ff-ac-display-status` (the button carries both; the default styles use only the new ones) |
+| CSS classes `ff-ac-play`, `ff-ac-play-button`, `ff-ac-play-status` | `ff-ac-display`, `ff-ac-display-button`, `ff-ac-display-status` |
 
 What reads differently: the default button label is "Display on Art
 Computer", the dialog title "Display on your Art Computer", the messages that
 told the visitor to press play now say try again, and an error's `name` is
 `"DisplayError"`. `buttonLabel` and `dialog.copy` overrides work as before, and
 error codes are unchanged. The IndexedDB database keeps the name `ff-play`. The
-self-hosted bundle is `display.js`; 0.5.x releases also attach it as
+self-hosted bundle is `display.js`; only 0.5.x releases also attached it as
 `play.js`.
 
 ## Upgrading from 0.5.x
@@ -137,7 +137,9 @@ self-hosted bundle is `display.js`; 0.5.x releases also attach it as
 `ctl` checks `kind === "displayGrant"` first. `relayerBaseUrl` is an option
 again on `DisplayDp1PlaylistOptions` and the button (no default), and
 `DisplayDp1PlaylistOptions` takes `fetchImpl` again for the relayer cast. A
-stored 0.4 session is kept and used, no longer removed. See
+stored 0.4 session is kept and used, no longer removed. The deprecated
+`Play` aliases, the `ff-ac-play*` class names and the `play.js` release asset
+are gone ([table above](#renamed-from-feralfileplay)). See
 [CHANGELOG.md](CHANGELOG.md).
 
 ## Upgrading from 0.4.x

@@ -11,9 +11,7 @@ import {
   hasStoredEphemeralBrowserSession,
   isTouchDevice,
   mountDisplayOnArtComputerButton,
-  mountPlayOnArtComputerButton,
   pairingErrorMessage,
-  PlayError,
   renderQrSvg,
   requestEphemeralSessionWithPairingUi,
   type DisplayErrorCode,
@@ -21,11 +19,9 @@ import {
   type DisplayOnArtComputerButtonOptions,
   type PairingDialog,
   type PairingDialogOptions,
-  type PairingMaterial,
-  type PlayErrorCode,
-  type PlayOnArtComputerButtonHandle,
-  type PlayOnArtComputerButtonOptions
+  type PairingMaterial
 } from "../src/index.js";
+import * as publicExports from "../src/index.js";
 import { readStoredDisplayGrant, replaceStoredDisplayGrant } from "../src/grantStore.js";
 import { brokerBaseUrl, captureError, expectNoSecrets, fakeBroker } from "./fakeBroker.js";
 import { fakeRelay } from "./fakeRelay.js";
@@ -965,44 +961,35 @@ describe("button label and dialog copy", () => {
   });
 });
 
-describe("deprecated Play names", () => {
-  /* eslint-disable @typescript-eslint/no-deprecated -- these tests pin the aliases kept for one release */
-  it("are the Display exports under their old names", () => {
-    expect(mountPlayOnArtComputerButton).toBe(mountDisplayOnArtComputerButton);
-    expect(PlayError).toBe(PublicDisplayError);
+describe("Display names", () => {
+  it("exports one error class and no Play aliases", () => {
     expect(PublicDisplayError).toBe(DisplayError);
-
-    const error = new PlayError("pairing canceled", "pairing_canceled");
-    expect(error).toBeInstanceOf(DisplayError);
-    expect(new DisplayError("pairing canceled", "pairing_canceled")).toBeInstanceOf(PlayError);
-    expect(error.name).toBe("DisplayError");
-
-    const code: PlayErrorCode = "pairing_canceled";
-    const sameCode: DisplayErrorCode = code;
-    expect(sameCode).toBe("pairing_canceled");
+    expect(new DisplayError("pairing canceled", "pairing_canceled").name).toBe("DisplayError");
+    const code: DisplayErrorCode = "pairing_canceled";
+    expect(code).toBe("pairing_canceled");
+    for (const name of ["mountPlayOnArtComputerButton", "PlayError"]) {
+      expect(publicExports, name).not.toHaveProperty(name);
+    }
   });
 
-  it("mount the button with both the ff-ac-display and the ff-ac-play class names", () => {
+  it("mounts the button with the ff-ac-display class names only", () => {
     const { document, fake } = fakeDocumentWithContainer();
-    const options: PlayOnArtComputerButtonOptions = {
+    const options: DisplayOnArtComputerButtonOptions = {
       container: "#display-button-container",
-      playlist: { dpVersion: "1.1.0", title: "Alias Playlist", items: [] },
+      playlist: { dpVersion: "1.1.0", title: "Class Playlist", items: [] },
       brokerBaseUrl,
       document,
       className: "site-button",
       statusClassName: "site-status"
     };
-    const sameOptions: DisplayOnArtComputerButtonOptions = options;
-    const handle: PlayOnArtComputerButtonHandle = mountPlayOnArtComputerButton(sameOptions);
-    const sameHandle: DisplayOnArtComputerButtonHandle = handle;
+    const handle: DisplayOnArtComputerButtonHandle = mountDisplayOnArtComputerButton(options);
 
-    expect(sameHandle.element.textContent).toBe("Display on Art Computer");
-    expect(sameHandle.element.className).toBe("ff-ac-display-button ff-ac-play-button site-button");
-    expect(sameHandle.statusElement.className).toBe("ff-ac-display-status ff-ac-play-status site-status");
-    expect(fake.body.find("ff-ac-display")).toBe(fake.body.find("ff-ac-play"));
+    expect(handle.element.textContent).toBe("Display on Art Computer");
+    expect(handle.element.className).toBe("ff-ac-display-button site-button");
+    expect(handle.statusElement.className).toBe("ff-ac-display-status site-status");
     expect(fake.body.find("ff-ac-display")).toBeDefined();
-    sameHandle.destroy();
+    expect(fake.body.find("ff-ac-play")).toBeUndefined();
+    handle.destroy();
     expect(fake.body.find("ff-ac-display")).toBeUndefined();
   });
-  /* eslint-enable @typescript-eslint/no-deprecated */
 });

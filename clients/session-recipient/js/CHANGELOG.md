@@ -27,6 +27,11 @@ One release for every Art Computer in the field.
   `session_rejected`, and the session is deleted.
 - `unpairArtComputer()` and `clearStoredEphemeralBrowserSession(origin)` also
   forget a stored session.
+- **Removed** the 0.5 deprecated aliases: `mountPlayOnArtComputerButton`,
+  `PlayOnArtComputerButtonOptions`, `PlayOnArtComputerButtonHandle`,
+  `PlayError`, `PlayErrorCode`, the `ff-ac-play`, `ff-ac-play-button` and
+  `ff-ac-play-status` class names, and the `play.js` release asset. Use the
+  `Display` names and `ff-ac-display*` classes.
 
 ## 0.5.0
 

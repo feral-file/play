@@ -142,12 +142,6 @@ export type DisplayOnArtComputerButtonHandle = {
   destroy: () => void;
 };
 
-/** @deprecated Renamed to `DisplayOnArtComputerButtonOptions`; removed in 0.6.0. */
-export type PlayOnArtComputerButtonOptions = DisplayOnArtComputerButtonOptions;
-
-/** @deprecated Renamed to `DisplayOnArtComputerButtonHandle`; removed in 0.6.0. */
-export type PlayOnArtComputerButtonHandle = DisplayOnArtComputerButtonHandle;
-
 type OptionalBrowserGlobals = {
   document?: Document;
   location?: { origin?: unknown };
@@ -443,14 +437,9 @@ export async function requestEphemeralSessionWithPairingUi(
   }
 }
 
-/**
- * Class names the button carries. The `ff-ac-play*` names are kept on the
- * same elements for sites that style them; they are deprecated and go in
- * 0.6.0. The default styles target only the `ff-ac-display*` names.
- */
-const buttonWrapperClassNames = "ff-ac-display ff-ac-play";
-const buttonClassNames = "ff-ac-display-button ff-ac-play-button";
-const buttonStatusClassNames = "ff-ac-display-status ff-ac-play-status";
+const buttonWrapperClassNames = "ff-ac-display";
+const buttonClassNames = "ff-ac-display-button";
+const buttonStatusClassNames = "ff-ac-display-status";
 
 export function mountDisplayOnArtComputerButton(options: DisplayOnArtComputerButtonOptions): DisplayOnArtComputerButtonHandle {
   validateRequestedExpiresInSeconds(options.requestedExpiresInSeconds);
@@ -489,12 +478,6 @@ export function mountDisplayOnArtComputerButton(options: DisplayOnArtComputerBut
     }
   };
 }
-
-/**
- * @deprecated Renamed to `mountDisplayOnArtComputerButton` with the move from
- * `@feralfile/play`; removed in 0.6.0. Same function, same options.
- */
-export const mountPlayOnArtComputerButton = mountDisplayOnArtComputerButton;
 
 async function displayFromButton(
   options: DisplayOnArtComputerButtonOptions,

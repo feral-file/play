@@ -35,15 +35,3 @@ export class DisplayError extends Error {
     this.code = code;
   }
 }
-
-/** @deprecated Renamed to `DisplayErrorCode` with the move from `@feralfile/play`; removed in 0.6.0. */
-export type PlayErrorCode = DisplayErrorCode;
-
-/**
- * @deprecated Renamed to `DisplayError` with the move from `@feralfile/play`;
- * removed in 0.6.0. It is the same class, so
- * `error instanceof PlayError` still matches every error the library throws.
- */
-export const PlayError = DisplayError;
-/** @deprecated Renamed to `DisplayError`; removed in 0.6.0. */
-export type PlayError = DisplayError;
