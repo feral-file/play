@@ -1,6 +1,6 @@
 {
   "name": "@feralfile/display",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Add a Display on Art Computer button to your website: pair a visitor's browser with their Feral File Art Computer and display a DP-1 playlist on it.",
   "license": "Apache-2.0",
   "type": "module",

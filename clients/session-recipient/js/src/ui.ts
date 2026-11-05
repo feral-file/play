@@ -1,7 +1,6 @@
 import qrcode from "qrcode-generator";
-import { displayDp1Playlist, pairingReplacedMessage, tooManyCastsMessage, type DisplayDp1PlaylistOptions, type Dp1Playlist } from "./cast.js";
+import { displayDp1Playlist, pairingReplacedMessage, relayerUnreachableMessage, tooManyCastsMessage, type DisplayDp1PlaylistOptions, type Dp1Playlist } from "./cast.js";
 import {
-  legacySessionStorageKey,
   readStoredEphemeralBrowserSession,
   requestEphemeralSession,
   validateAppLinkBaseUrl,
@@ -15,6 +14,7 @@ import type { SocketFactory } from "./control/relay-client.js";
 import { DisplayError } from "./errors.js";
 import { deleteStoredDisplayGrant, hasIndexedDb } from "./grantStore.js";
 import type { PairingMaterial } from "./pairingPayload.js";
+import { removeStoredRelayerSession } from "./sessionStore.js";
 
 export type PairingDialogCopy = {
   title: string;
@@ -92,6 +92,12 @@ export type DisplayOnArtComputerButtonOptions = {
   playlist: ValueProvider<Dp1Playlist>;
   brokerBaseUrl: ValueProvider<string>;
   /**
+   * The legacy relayer a relayer session (from an Art Computer on FF OS
+   * without display grants) casts to when the session names none. No default;
+   * see `DisplayDp1PlaylistOptions.relayerBaseUrl`.
+   */
+  relayerBaseUrl?: ValueProvider<string | undefined>;
+  /**
    * Base of the link that brings the visitor's Art Computer to the pairing
    * channel. Defaults to `https://link.feralfile.com/pair`.
    */
@@ -136,16 +142,9 @@ export type DisplayOnArtComputerButtonHandle = {
   destroy: () => void;
 };
 
-/** @deprecated Renamed to `DisplayOnArtComputerButtonOptions`; removed in 0.6.0. */
-export type PlayOnArtComputerButtonOptions = DisplayOnArtComputerButtonOptions;
-
-/** @deprecated Renamed to `DisplayOnArtComputerButtonHandle`; removed in 0.6.0. */
-export type PlayOnArtComputerButtonHandle = DisplayOnArtComputerButtonHandle;
-
 type OptionalBrowserGlobals = {
   document?: Document;
   location?: { origin?: unknown };
-  localStorage?: Pick<Storage, "removeItem">;
 };
 
 const dialogStyleElementId = "ff-art-computer-pairing-ui-style";
@@ -186,7 +185,9 @@ export function pairingErrorMessage(error: unknown): string {
       case "device_unsupported":
         return "This Art Computer needs an FF OS update before this site can display art on it.";
       case "device_unrecognized":
-        return "Your Art Computer no longer recognizes this site. Pair again?";
+        return error.message === relayerUnreachableMessage
+          ? error.message
+          : "Your Art Computer no longer recognizes this site. Pair again?";
       case "storage_unavailable":
         return "This browser cannot store the pairing. Allow site data and try again.";
       case "too_many_sites":
@@ -205,16 +206,12 @@ export function pairingErrorMessage(error: unknown): string {
 }
 
 /**
- * Forgets this origin's display grant and keys, without telling the FF1
- * (`unpairArtComputer` does both). Synchronous: the delete is issued and the
- * next read waits behind it. Also drops a 0.4 session record if one is left.
+ * Forgets this origin's pairing, a display grant with its keys or a relayer
+ * session, without telling the FF1 (`unpairArtComputer` also revokes a
+ * grant). Synchronous: the delete is issued and the next read waits behind it.
  */
 export function clearStoredEphemeralBrowserSession(origin: string): void {
-  try {
-    (globalThis as unknown as OptionalBrowserGlobals).localStorage?.removeItem(legacySessionStorageKey(origin));
-  } catch {
-    // Storage access can throw in a sandboxed frame; there is nothing to remove then.
-  }
+  removeStoredRelayerSession(origin);
   if (hasIndexedDb()) {
     void deleteStoredDisplayGrant(origin).catch(() => undefined);
   }
@@ -400,13 +397,15 @@ export function createPairingDialog(options: PairingDialogOptions): PairingDialo
 }
 
 export async function requestEphemeralSessionWithPairingUi(
-  options: RequestEphemeralSessionWithPairingUiOptions
+  options: RequestEphemeralSessionWithPairingUiOptions,
+  /** @internal See `requestEphemeralSession`. */
+  internal: { skipStoredSession?: boolean } = {}
 ): Promise<EphemeralBrowserSession> {
   validateRequestedExpiresInSeconds(options.requestedExpiresInSeconds);
   validateAppLinkBaseUrl(options.appLinkBaseUrl);
   const origin = currentOriginForUi();
   const existingSession = options.storage === false ? undefined : await readStoredEphemeralBrowserSession(origin);
-  if (existingSession !== undefined) {
+  if (existingSession !== undefined && !(internal.skipStoredSession === true && existingSession.kind === "relayerSession")) {
     return existingSession;
   }
 
@@ -432,7 +431,7 @@ export async function requestEphemeralSessionWithPairingUi(
       onPeerJoined: () => {
         dialog.setStatus(copy.approveStatus);
       }
-    });
+    }, internal);
     dialog.setStatus(copy.approvedStatus);
     dialog.close();
     return session;
@@ -442,14 +441,9 @@ export async function requestEphemeralSessionWithPairingUi(
   }
 }
 
-/**
- * Class names the button carries. The `ff-ac-play*` names are kept on the
- * same elements for sites that style them; they are deprecated and go in
- * 0.6.0. The default styles target only the `ff-ac-display*` names.
- */
-const buttonWrapperClassNames = "ff-ac-display ff-ac-play";
-const buttonClassNames = "ff-ac-display-button ff-ac-play-button";
-const buttonStatusClassNames = "ff-ac-display-status ff-ac-play-status";
+const buttonWrapperClassNames = "ff-ac-display";
+const buttonClassNames = "ff-ac-display-button";
+const buttonStatusClassNames = "ff-ac-display-status";
 
 export function mountDisplayOnArtComputerButton(options: DisplayOnArtComputerButtonOptions): DisplayOnArtComputerButtonHandle {
   validateRequestedExpiresInSeconds(options.requestedExpiresInSeconds);
@@ -472,9 +466,10 @@ export function mountDisplayOnArtComputerButton(options: DisplayOnArtComputerBut
   container.append(wrapper);
 
   const clickController = new AbortController();
-  // Set after `device_unrecognized`: the stored grant is kept until the
-  // visitor taps again, since any channel peer can forge that answer.
-  const state = { pairAgain: false };
+  // Set after `device_unrecognized`: the stored pairing is kept until the
+  // visitor taps again, since any channel peer can forge that answer (a
+  // grant) or an old FF1 that is only off gives it too (a session).
+  const state: PairAgainState = { pairAgain: false };
   button.addEventListener("click", () => {
     void displayFromButton(options, ownerDocument, button, status, state);
   }, { signal: clickController.signal });
@@ -490,17 +485,20 @@ export function mountDisplayOnArtComputerButton(options: DisplayOnArtComputerBut
 }
 
 /**
- * @deprecated Renamed to `mountDisplayOnArtComputerButton` with the move from
- * `@feralfile/play`; removed in 0.6.0. Same function, same options.
+ * `grant`: the FF1 answered a grant's cast with an unverified unknown
+ * controller; the tap clears the grant and pairs. `session`: the legacy
+ * relayer answered a session's cast with 1003; the tap pairs past the session
+ * without deleting it, so a pairing that fails (the FF1 was only off) leaves
+ * it working, and a pairing that succeeds replaces it.
  */
-export const mountPlayOnArtComputerButton = mountDisplayOnArtComputerButton;
+type PairAgainState = { pairAgain: false | "grant" | "session" };
 
 async function displayFromButton(
   options: DisplayOnArtComputerButtonOptions,
   ownerDocument: Document,
   button: HTMLButtonElement,
   status: HTMLElement,
-  state: { pairAgain: boolean }
+  state: PairAgainState
 ): Promise<void> {
   const idleLabel = options.buttonLabel ?? defaultButtonLabel;
   button.disabled = true;
@@ -509,12 +507,13 @@ async function displayFromButton(
     setStatus(options, status, "Checking pairing.");
     const brokerBaseUrl = await resolveProvider(options.brokerBaseUrl);
     const origin = currentOriginForUi();
-    if (state.pairAgain) {
+    const skipStoredSession = state.pairAgain === "session";
+    if (state.pairAgain === "grant") {
       // Only the visitor's tap clears a grant the FF1 said it did not know.
-      state.pairAgain = false;
       clearStoredEphemeralBrowserSession(origin);
     }
-    if (options.storage === false || !(await hasStoredEphemeralBrowserSession(origin))) {
+    state.pairAgain = false;
+    if (skipStoredSession || options.storage === false || !(await hasStoredEphemeralBrowserSession(origin))) {
       setStatus(options, status, "Waiting for your Art Computer.");
     }
     const session = await requestEphemeralSessionWithPairingUi({
@@ -532,34 +531,38 @@ async function displayFromButton(
         document: ownerDocument,
         ...options.dialog
       }
-    });
+    }, { skipStoredSession });
     setStatus(options, status, "Sending playlist to Art Computer.");
-    await displayDp1Playlist(displayOptions(options, session, await resolveProvider(options.playlist)));
+    await displayDp1Playlist(displayOptions(options, session, await resolveProvider(options.playlist), await resolveOptionalProvider(options.relayerBaseUrl)));
     setStatus(options, status, "Playlist sent to Art Computer.");
     options.onSuccess?.();
   } catch (error) {
     // session_rejected needs no clearing here: the library already deleted
-    // the rejected grant by its ctl, and an unconditional clear would remove
-    // a newer grant another tab stored meanwhile.
+    // the rejected grant by its ctl (or session by its id), and an
+    // unconditional clear would remove a newer one another tab stored
+    // meanwhile.
     if (error instanceof DisplayError && error.code === "device_unrecognized") {
-      state.pairAgain = true;
+      state.pairAgain = error.message === relayerUnreachableMessage ? "session" : "grant";
     }
     setStatus(options, status, pairingErrorMessage(error));
     options.onError?.(error);
   } finally {
     button.disabled = false;
-    button.textContent = state.pairAgain ? options.pairAgainLabel ?? defaultPairAgainLabel : idleLabel;
+    button.textContent = state.pairAgain === false ? idleLabel : options.pairAgainLabel ?? defaultPairAgainLabel;
   }
 }
 
 function displayOptions(
   buttonOptions: DisplayOnArtComputerButtonOptions,
   session: EphemeralBrowserSession,
-  playlist: Dp1Playlist
+  playlist: Dp1Playlist,
+  relayerBaseUrl: string | undefined
 ): DisplayDp1PlaylistOptions {
   return {
     session,
     playlist,
+    ...(relayerBaseUrl === undefined ? {} : { relayerBaseUrl }),
+    ...(buttonOptions.fetchImpl === undefined ? {} : { fetchImpl: buttonOptions.fetchImpl }),
     ...(buttonOptions.socketFactory === undefined ? {} : { socketFactory: buttonOptions.socketFactory }),
     ...(buttonOptions.castTimeoutMs === undefined ? {} : { timeoutMs: buttonOptions.castTimeoutMs })
   };
@@ -579,6 +582,10 @@ async function resolveProvider<T>(provider: ValueProvider<T>): Promise<T> {
     return (provider as () => T | Promise<T>)();
   }
   return provider;
+}
+
+async function resolveOptionalProvider<T>(provider: ValueProvider<T | undefined> | undefined): Promise<T | undefined> {
+  return provider === undefined ? undefined : resolveProvider(provider);
 }
 
 

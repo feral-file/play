@@ -1,6 +1,6 @@
 # @feralfile/display
 
-`clients/session-recipient/js/` is `@feralfile/display`, the browser library websites embed to pair a visitor's browser with their Art Computer and display a DP-1 playlist on it. It was published as `@feralfile/play` through 0.4.0; see [Renamed from @feralfile/play](#renamed-from-feralfileplay). Internally it is the mint-pairing requester: the browser client that asks the Go token minter embedded in FF1 `feral-controld` for a **display grant**, a display-only controller record of the FF1 control protocol (ffos-user `docs/ff1-control-v1.md` §5.7), and then casts to the FF1 over relay v2 with the keys that grant was issued to.
+`clients/session-recipient/js/` is `@feralfile/display`, the browser library websites embed to pair a visitor's browser with their Art Computer and display a DP-1 playlist on it. It was published as `@feralfile/play` through 0.4.0; see [Renamed from @feralfile/play](#renamed-from-feralfileplay). Internally it is the mint-pairing requester: the browser client that asks the Go token minter embedded in FF1 `feral-controld` for a **display grant**, a display-only controller record of the FF1 control protocol (ffos-user `docs/ff1-control-v1.md` §5.7), and then casts to the FF1 over relay v2 with the keys that grant was issued to. An FF1 on FF OS without display grants answers the same request with a **relayer session** instead, and the library casts with it through the legacy relayer, as 0.4 did; see [Both firmware generations](#both-firmware-generations).
 
 ```sh
 npm i @feralfile/display
@@ -40,17 +40,19 @@ mountDisplayOnArtComputerButton({
   container: "#display-on-art-computer",
   playlist: dp1Playlist,
   brokerBaseUrl: "https://handoff.feralfile.com",
+  // Where a relayer session casts when the FF1 names no relayer of its own;
+  // only FF1s on FF OS without display grants use it.
+  relayerBaseUrl: "https://tv-cast-coordination.autonomy-system.workers.dev",
   // Optional; this is the default.
   appLinkBaseUrl: "https://link.feralfile.com/pair"
 });
 ```
 
-The relay endpoint arrives inside the grant (`relayV2Endpoint`) and is the only
-one used, so never hard-code a host in display code. A
-`Content-Security-Policy` still has to be written before any grant exists, so
-`connect-src` needs the relay v2 host up front: the
-[Integration Guide](../../../docs/integration.md#network-endpoints) lists the
-hosts to allow.
+The relay v2 endpoint arrives inside the grant (`relayV2Endpoint`) and is the
+only one a grant uses, so never hard-code a relay v2 host in display code. A
+`Content-Security-Policy` still has to be written before any pairing exists,
+so `connect-src` needs the hosts up front: the
+[Integration Guide](../../../docs/integration.md#network-endpoints) lists them.
 
 On a touch device (phone or tablet) the dialog shows an
 **Open the Feral File app** link and, below it, the six-digit code, which
@@ -65,7 +67,11 @@ shows fresh material, up to twice, and then the button fails with
 When the FF1 answers a cast with an unverified `unknown_controller` or
 `bad_envelope` (a factory reset, or the site was removed on the device), the
 button fails with `device_unrecognized`, keeps the stored grant, and reads
-"Pair again?"; only the visitor's next click clears it and pairs again.
+"Pair again?"; only the visitor's next click clears it and pairs again. When
+the legacy relayer answers a relayer session's cast with
+`400 {"error":{"id":1003}}` (no FF1 on the session's channel: updated, or
+off), the button also reads "Pair again?", but that click pairs without
+deleting the session; only a successful pairing replaces it.
 
 For custom UI, use `createPairingDialog`,
 `requestEphemeralSessionWithPairingUi`, `hasStoredEphemeralBrowserSession`,
@@ -74,32 +80,77 @@ layout overrides so a website can keep its own styling while preserving the
 pairing sequence and approval handoff; `createDialog` replaces it with any
 implementation of `PairingDialog` (`{ show, setStatus, close }`).
 
+## Both firmware generations
+
+One pairing request serves every FF1. It carries the display-grant keys, and
+the FF1 answers with what its firmware can issue:
+
+- **FF OS with display grants**: a display grant. `EphemeralBrowserSession` is
+  `{ kind: "displayGrant", deviceId, ctl, expiresAt?, persistent }`, the grant
+  and its keys live in IndexedDB, and casts go over relay v2.
+- **FF OS without display grants** (2.0.x): its minter ignores the keys and
+  mints a relayer session. `EphemeralBrowserSession` is
+  `{ kind: "relayerSession", sessionId, expiresAt?, persistent, relayerBaseUrl? }`;
+  the token is stored in `localStorage` under
+  `ephemeralBrowserSessionStorageKey(origin)` (the 0.4 key and record, so a
+  session 0.4 stored keeps working) and never appears in the returned value.
+  A cast is one HTTPS `POST /api/cast` on the session's `relayerBaseUrl`, or
+  the `relayerBaseUrl` option when the session names none; with neither, the
+  cast throws.
+
+On each display request the library takes a stored grant first, then a stored
+session, and pairs only when neither is valid. A grant replaces any stored
+session. When an FF1 that paired on 2.0.x moves to FF OS with display grants,
+the legacy relayer answers the old session's cast with
+`400 {"error":{"id":1003}}`; the library throws `device_unrecognized` and keeps
+the session, because an old FF1 that is only switched off answers the same.
+The button then reads "Pair again?", and that pairing yields a grant.
+
 ## Renamed from @feralfile/play
 
 The verb for putting art on a display is display, not play, so the package is
 `@feralfile/display` from 0.5.0 and the button reads **Display on Art
 Computer**. `@feralfile/play` stops at 0.4.0. To move, change the dependency
 and the import specifier, then follow [Upgrading from 0.4.x](#upgrading-from-04x).
-The old names keep working in 0.5.x as deprecated aliases and go in 0.6.0:
+The old names were deprecated aliases in 0.5.x and are gone in 0.6.0:
 
-| Deprecated (0.5.x) | Use |
+| Removed in 0.6.0 | Use |
 | :-- | :-- |
 | `mountPlayOnArtComputerButton` | `mountDisplayOnArtComputerButton` |
 | `PlayOnArtComputerButtonOptions` | `DisplayOnArtComputerButtonOptions` |
 | `PlayOnArtComputerButtonHandle` | `DisplayOnArtComputerButtonHandle` |
-| `PlayError` | `DisplayError` (the same class: `instanceof PlayError` still matches) |
+| `PlayError` | `DisplayError` |
 | `PlayErrorCode` | `DisplayErrorCode` |
-| CSS classes `ff-ac-play`, `ff-ac-play-button`, `ff-ac-play-status` | `ff-ac-display`, `ff-ac-display-button`, `ff-ac-display-status` (the button carries both; the default styles use only the new ones) |
+| CSS classes `ff-ac-play`, `ff-ac-play-button`, `ff-ac-play-status` | `ff-ac-display`, `ff-ac-display-button`, `ff-ac-display-status` |
 
 What reads differently: the default button label is "Display on Art
 Computer", the dialog title "Display on your Art Computer", the messages that
 told the visitor to press play now say try again, and an error's `name` is
 `"DisplayError"`. `buttonLabel` and `dialog.copy` overrides work as before, and
 error codes are unchanged. The IndexedDB database keeps the name `ff-play`. The
-self-hosted bundle is `display.js`; 0.5.x releases also attach it as
+self-hosted bundle is `display.js`; only 0.5.x releases also attached it as
 `play.js`.
 
+## Upgrading from 0.5.x
+
+0.6.0 pairs with every FF1 instead of failing older firmware with
+`device_unsupported`. `EphemeralBrowserSession` is a union discriminated by
+`kind` (`"displayGrant"` or `"relayerSession"`); code that reads `deviceId` or
+`ctl` checks `kind === "displayGrant"` first. `relayerBaseUrl` is an option
+again on `DisplayDp1PlaylistOptions` and the button (no default), and
+`DisplayDp1PlaylistOptions` takes `fetchImpl` again for the relayer cast. A
+stored 0.4 session is kept and used, no longer removed. The deprecated
+`Play` aliases, the `ff-ac-play*` class names and the `play.js` release asset
+are gone ([table above](#renamed-from-feralfileplay)). See
+[CHANGELOG.md](CHANGELOG.md).
+
 ## Upgrading from 0.4.x
+
+Move straight to 0.6: it keeps the visitor's stored 0.4 session, and an FF1 on
+FF OS with display grants is paired again with a grant the first time the old
+session stops reaching it. What changed against 0.4 is below (written for
+0.5.0; 0.6.0 brings back the relayer session, `relayerBaseUrl`,
+`fetchImpl` and `ephemeralBrowserSessionStorageKey` described above).
 
 0.5.0 is a breaking release. The library casts only with
 a device-issued display grant over relay v2; there is no relayer token, no
@@ -135,6 +186,7 @@ envelope with the fixture device keys.
 ## Boundaries
 
 - Keep a grant's private keys non-extractable and only in origin-scoped IndexedDB, together with the grant and its request counter.
+- Keep a relayer session's token only in origin-scoped `localStorage`; never return it from the public API or put it in a thrown error.
 - Do not expose key material or the pairing token through logs, thrown errors, analytics, or public callbacks. The one exception is the channel's pairing token inside the app link, which `onPairingMaterial` hands over because the visitor has to open or scan it; it is single-use and dies with the channel.
 - A grant seals only `displayPlaylist` in the Play shape (the FF1 control protocol's name for that command form) and its own `revokeController`; the FF1 refuses everything else with `permission_denied`.
 - Connect to relay v2 per cast and close at once; never hold an idle socket.

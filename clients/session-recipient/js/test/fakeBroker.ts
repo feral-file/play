@@ -39,6 +39,13 @@ export function authorizationHeader(init: RequestInit | undefined): string | nul
   return headers.get("authorization");
 }
 
+/** The session 2.0.x firmware mints for a request it decodes without its displayGrant. */
+export const legacySessionBody: Record<string, JsonValue> = {
+  token: "browser-session-token-secret",
+  sessionId: "sess_123",
+  expiresAt: "2030-01-01T00:00:00.000Z"
+};
+
 export type ResultKind =
   | {
       type: "mint_succeeded";
@@ -49,8 +56,12 @@ export type ResultKind =
       ctl?: string;
       /** Override the profile the grant pins. */
       profile?: unknown;
-      /** Answer like firmware without display grants: a session and no displayGrant. */
-      legacySession?: boolean;
+      /**
+       * Answer like firmware without display grants: a session and no
+       * displayGrant. `true` sends the default session; an object replaces
+       * its members.
+       */
+      legacySession?: true | Record<string, JsonValue>;
       requestMessageId?: string | null;
     }
   | { type: "mint_rejected"; reason?: string; requestMessageId?: string | null };
@@ -161,12 +172,12 @@ export async function fakeBroker(options: FakeBrokerOptions = {}) {
     let plaintext: Record<string, JsonValue>;
     if (result.type === "mint_rejected") {
       plaintext = { v: 1, type: "mint_rejected", channelId: channel.channelId, reason: result.reason ?? "denied" };
-    } else if (result.legacySession === true) {
+    } else if (result.legacySession !== undefined) {
       plaintext = {
         v: 1,
         type: "mint_succeeded",
         channelId: channel.channelId,
-        session: { token: "browser-session-token-secret", sessionId: "sess_123", expiresAt: "2030-01-01T00:00:00.000Z" }
+        session: result.legacySession === true ? legacySessionBody : result.legacySession
       };
     } else {
       plaintext = { v: 1, type: "mint_succeeded", channelId: channel.channelId, displayGrant: grantFor(request, result) };

@@ -2,7 +2,7 @@
 
 ## Component
 
-`clients/session-recipient/js/` is the TypeScript token requester implementation for browser runtimes. It creates a pairing channel on the Mint Pairing Broker, shows the visitor the app link and six-digit code that bring their Art Computer to it, requests a display grant (FF1 control protocol v1 §5.7) from the Go token minter embedded in FF1 `feral-controld` once that minter joins, and casts to the FF1 over relay v2 with the grant's keys.
+`clients/session-recipient/js/` is the TypeScript token requester implementation for browser runtimes. It creates a pairing channel on the Mint Pairing Broker, shows the visitor the app link and six-digit code that bring their Art Computer to it, requests a display grant (FF1 control protocol v1 §5.7) from the Go token minter embedded in FF1 `feral-controld` once that minter joins, and casts to the FF1 over relay v2 with the grant's keys. An FF1 on FF OS without display grants answers the same request with a relayer session, which the library stores and casts with through the legacy relayer's `/api/cast`.
 
 ## Commands
 
@@ -27,4 +27,6 @@ npm run bundle
 - `test/fixtures/ff1-control-v1` is vendored verbatim from ffos-user; do not edit it by hand. Re-vendor the directory and update `SOURCE.md` when ffos-user regenerates the fixtures (display-grant vectors arrive that way).
 - Connect to relay v2 per cast and close the socket right after; never hold an idle connection.
 - A public `unknown_controller`/`bad_envelope` from the channel is unverified: surface `device_unrecognized` and keep the grant; only the visitor's action clears it.
+- A relayer session's token lives only in this origin's `localStorage`, under `ephemeralBrowserSessionStorageKey(origin)` in the record shape 0.4 wrote; never return it from the public API, log it, or put it in a thrown error. Keep the key and shape: stored 0.4 sessions are found by them.
+- Storage precedence is a grant, then a session, then pair. The relayer's `400 {"error":{"id":1003}}` on a session cast is `device_unrecognized` and never clears the session: an updated FF1 and an old FF1 that is off answer the same.
 - Keep TypeScript strict mode, `noUncheckedIndexedAccess`, and type-aware ESLint rules enabled.

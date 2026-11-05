@@ -404,6 +404,7 @@ describe("site-initiated mint pairing integration", () => {
     try {
       const session = await browserSessionPromise;
       expect(session).toEqual({
+        kind: "displayGrant",
         deviceId: "FF1-FIXTURE1",
         ctl: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) as unknown,
         expiresAt: "2030-01-01T00:00:00Z",
@@ -475,6 +476,7 @@ describe("site-initiated mint pairing integration", () => {
     });
 
     await expect(browserSessionPromise).resolves.toEqual({
+      kind: "displayGrant",
       deviceId: "FF1-FIXTURE1",
       ctl: thumbprint(plaintext.displayGrant.sig),
       expiresAt: "2030-01-01T00:00:00.000Z",

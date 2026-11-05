@@ -1,9 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { displayDp1Playlist, unpairArtComputer } from "../src/cast.js";
+import { ephemeralBrowserSessionStorageKey, type DisplayGrantSession, type RelayerSession } from "../src/client.js";
+import { installLocalStorage, uninstallLocalStorage } from "./localStorage.js";
 import type { DisplayError } from "../src/errors.js";
 import { readStoredDisplayGrant, replaceStoredDisplayGrant } from "../src/grantStore.js";
 import type { Jwk } from "./control-device.js";
-import { captureError } from "./fakeBroker.js";
+import { captureError, requestUrl } from "./fakeBroker.js";
 import { fakeRelay, type FakeSocket } from "./fakeRelay.js";
 import { deviceOnRelay, resetIndexedDb, seedGrant } from "./grants.js";
 
@@ -20,7 +22,7 @@ afterEach(() => {
 });
 
 /** The session the page holds; `seeded` points it at the grant it writes. */
-const session = { deviceId: "FF1-FIXTURE1", ctl: "", persistent: true };
+const session: DisplayGrantSession = { kind: "displayGrant", deviceId: "FF1-FIXTURE1", ctl: "", persistent: true };
 
 async function seeded(): Promise<{ ctl: string; sig: Jwk; grants: Record<string, Jwk> }> {
   const { record, sig } = await seedGrant(testOrigin);
@@ -244,5 +246,141 @@ describe("unpairArtComputer", () => {
     const relay = fakeRelay({ peers: [] });
     await unpairArtComputer({ socketFactory: relay.socketFactory });
     expect(relay.sockets).toHaveLength(0);
+  });
+
+  it("forgets a stored relayer session", async () => {
+    const entries = installLocalStorage([[ephemeralBrowserSessionStorageKey(testOrigin), storedSession()]]);
+    try {
+      await unpairArtComputer();
+      expect(entries.size).toBe(0);
+    } finally {
+      uninstallLocalStorage();
+    }
+  });
+});
+
+/** A relayer session as 0.4 (and 0.6, for older FF OS) stores it. */
+function storedSession(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({ origin: testOrigin, token: "relayer-token-secret", sessionId: "sess_1", persistent: true, ...overrides });
+}
+
+const relayerSession: RelayerSession = { kind: "relayerSession", sessionId: "sess_1", persistent: true };
+
+function relayerAnswer(status: number, body: unknown): ReturnType<typeof vi.fn<typeof fetch>> {
+  return vi.fn<typeof fetch>(() => Promise.resolve(new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } })));
+}
+
+describe("displayDp1Playlist with a relayer session", () => {
+  let entries: Map<string, string>;
+  beforeEach(() => {
+    entries = installLocalStorage([[ephemeralBrowserSessionStorageKey(testOrigin), storedSession()]]);
+  });
+  afterEach(() => {
+    uninstallLocalStorage();
+  });
+
+  it("POSTs the playlist to /api/cast on the integrator's relayer with the stored token as bearer", async () => {
+    const fetchImpl = relayerAnswer(200, { message: { ok: true } });
+    await displayDp1Playlist({ session: relayerSession, playlist, relayerBaseUrl: "https://relayer.example/", fetchImpl });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchImpl.mock.calls[0] ?? [];
+    expect(url === undefined ? undefined : requestUrl(url)).toBe("https://relayer.example/api/cast");
+    expect(init?.method).toBe("POST");
+    expect(init?.headers).toMatchObject({ authorization: "Bearer relayer-token-secret" });
+    expect(JSON.parse(init?.body as string)).toEqual({ command: "displayPlaylist", request: { intent: { action: "now_display" }, dp1_call: playlist } });
+  });
+
+  it("prefers the relayer the session names over the option", async () => {
+    entries.set(ephemeralBrowserSessionStorageKey(testOrigin), storedSession({ relayerBaseUrl: "https://named.example" }));
+    const fetchImpl = relayerAnswer(200, { ok: true });
+    await displayDp1Playlist({ session: relayerSession, playlist, relayerBaseUrl: "https://relayer.example", fetchImpl });
+    expect(requestUrl(fetchImpl.mock.calls[0]?.[0] ?? "")).toBe("https://named.example/api/cast");
+  });
+
+  it("fails without a relayer from the session or the option, sending nothing", async () => {
+    const fetchImpl = relayerAnswer(200, { ok: true });
+    await expect(displayDp1Playlist({ session: relayerSession, playlist, fetchImpl })).rejects.toThrow("relayer base URL is required");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("maps the relayer's 400 1003 (no FF1 on the topic) to device_unrecognized and keeps the session", async () => {
+    const fetchImpl = relayerAnswer(400, { error: { id: 1003, message: "device not connected" } });
+    const error = await captureError(displayDp1Playlist({ session: relayerSession, playlist, relayerBaseUrl: "https://relayer.example", fetchImpl }));
+    expect((error as DisplayError).code).toBe("device_unrecognized");
+    expect(String(error)).not.toMatch(/secret/);
+    // An old FF1 that is only off answers the same: never cleared here.
+    expect(entries.has(ephemeralBrowserSessionStorageKey(testOrigin))).toBe(true);
+  });
+
+  it.each([
+    { name: "another 400", status: 400, body: { error: { id: 1001 } } },
+    { name: "a 502", status: 502, body: { error: { id: 1003 } } }
+  ])("maps $name to display_failed and keeps the session", async ({ status, body }) => {
+    const fetchImpl = relayerAnswer(status, body);
+    const error = await captureError(displayDp1Playlist({ session: relayerSession, playlist, relayerBaseUrl: "https://relayer.example", fetchImpl }));
+    expect((error as DisplayError).code).toBe("display_failed");
+    expect(entries.has(ephemeralBrowserSessionStorageKey(testOrigin))).toBe(true);
+  });
+
+  it.each([401, 403])("maps %i to session_rejected and removes the session", async (status) => {
+    const fetchImpl = relayerAnswer(status, { error: { id: 1 } });
+    const error = await captureError(displayDp1Playlist({ session: relayerSession, playlist, relayerBaseUrl: "https://relayer.example", fetchImpl }));
+    expect((error as DisplayError).code).toBe("session_rejected");
+    expect(entries.size).toBe(0);
+  });
+
+  it.each([{ ok: false }, { message: { ok: false } }])("maps a refused reply %j to display_rejected", async (body) => {
+    const error = await captureError(displayDp1Playlist({ session: relayerSession, playlist, relayerBaseUrl: "https://relayer.example", fetchImpl: relayerAnswer(200, body) }));
+    expect((error as DisplayError).code).toBe("display_rejected");
+  });
+
+  it("fails with display_failed at timeoutMs when the relayer answers late, even if fetch ignores the abort", async () => {
+    const late = vi.fn<typeof fetch>(() => new Promise((resolve) => setTimeout(() => {
+      resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    }, 250)));
+    const started = Date.now();
+    const error = await captureError(displayDp1Playlist({ session: relayerSession, playlist, relayerBaseUrl: "https://relayer.example", fetchImpl: late, timeoutMs: 20 }));
+    expect((error as DisplayError).code).toBe("display_failed");
+    expect(Date.now() - started).toBeLessThan(200);
+    expect(late.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+    expect(entries.has(ephemeralBrowserSessionStorageKey(testOrigin))).toBe(true);
+  });
+
+  it("holds one deadline over the retry and the body read", async () => {
+    // First attempt fails at once, the retry answers with a body that never ends.
+    const stalledBody = new Response(new ReadableStream({ start: () => undefined }), { status: 200 });
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce(stalledBody);
+    const started = Date.now();
+    const error = await captureError(displayDp1Playlist({ session: relayerSession, playlist, relayerBaseUrl: "https://relayer.example", fetchImpl, timeoutMs: 30 }));
+    expect((error as DisplayError).code).toBe("display_failed");
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(Date.now() - started).toBeLessThan(200);
+  });
+
+  it("retries once after a network failure", async () => {
+    const answer = relayerAnswer(200, { ok: true });
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockImplementation(answer);
+    await displayDp1Playlist({ session: relayerSession, playlist, relayerBaseUrl: "https://relayer.example", fetchImpl });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("refuses to cast with a session that is not the stored one, leaving the stored one alone", async () => {
+    const fetchImpl = relayerAnswer(200, { ok: true });
+    const error = await captureError(displayDp1Playlist({ session: { ...relayerSession, sessionId: "sess_stale" }, playlist, relayerBaseUrl: "https://relayer.example", fetchImpl }));
+    expect((error as DisplayError).code).toBe("display_failed");
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(entries.has(ephemeralBrowserSessionStorageKey(testOrigin))).toBe(true);
+  });
+
+  it("throws session_rejected without a stored session", async () => {
+    entries.clear();
+    const fetchImpl = relayerAnswer(200, { ok: true });
+    const error = await captureError(displayDp1Playlist({ session: relayerSession, playlist, relayerBaseUrl: "https://relayer.example", fetchImpl }));
+    expect((error as DisplayError).code).toBe("session_rejected");
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });

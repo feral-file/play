@@ -1,18 +1,31 @@
-import type { EphemeralBrowserSession } from "./client.js";
+import type { DisplayGrantSession, EphemeralBrowserSession, RelayerSession } from "./client.js";
 import { findEnvelopeAnswer, openReply, sealRequest, type ReplyClaims } from "./control/codec.js";
 import { RelayClient, RelayConnectError, RelayUndeliveredError, type SocketFactory } from "./control/relay-client.js";
 import { DisplayError } from "./errors.js";
 import { deleteStoredDisplayGrant, readStoredDisplayGrant, reserveCounter, type StoredDisplayGrant } from "./grantStore.js";
+import { readStoredRelayerSession, removeStoredRelayerSession } from "./sessionStore.js";
 
 export type Dp1Playlist = Record<string, unknown>;
 
 export type DisplayDp1PlaylistOptions = {
   session: EphemeralBrowserSession;
   playlist: Dp1Playlist;
-  /** Deadline for the whole relay round trip, connecting included. Default 30 s, plus about a second per 24 KB of playlist over 32 KB. */
+  /**
+   * Deadline for the whole relay round trip, connecting included (for a
+   * relayer session: the request, its one retry and reading the answer).
+   * Default 30 s, plus about a second per 24 KB of playlist over 32 KB.
+   */
   timeoutMs?: number;
   /** Opens the relay WebSocket; defaults to the browser's `WebSocket`. */
   socketFactory?: SocketFactory;
+  /**
+   * The legacy relayer a relayer session casts to when the session names none
+   * of its own. No default: such a session without either fails. Unused for a
+   * display grant.
+   */
+  relayerBaseUrl?: string;
+  /** Sends a relayer session's HTTPS cast; defaults to the global `fetch`. */
+  fetchImpl?: typeof fetch;
 };
 
 const defaultTimeoutMs = 30_000;
@@ -20,6 +33,12 @@ const defaultTimeoutMs = 30_000;
 export const tooManyCastsMessage = "Too many casts at once from this network, or the relay is unreachable. Try again in a moment.";
 /** Shown as-is by the wrapped button: the page holds a pairing another tab has since replaced. */
 export const pairingReplacedMessage = "This page's pairing was replaced by a newer one. Reload the page and try again.";
+/**
+ * Shown as-is by the wrapped button: the legacy relayer's 1003 for a relayer
+ * session. An FF1 that updated and one that is only off look the same, so the
+ * copy says both.
+ */
+export const relayerUnreachableMessage = "Could not reach your Art Computer. If it is on and was updated recently, pair again.";
 /** Bytes a request may carry before the relay's chunk pacing earns it more time. */
 const chunkSize = 32_768;
 /** A self-revoke is best effort: it gets a short deadline and its outcome is ignored. */
@@ -154,11 +173,21 @@ function resOk(res: unknown): boolean | undefined {
 }
 
 /**
- * Displays a DP-1 playlist on the paired Art Computer: seals `displayPlaylist`
- * under this origin's display grant and sends it over relay v2. The keys
- * never leave IndexedDB; `session` names the pairing this page obtained.
+ * Displays a DP-1 playlist on the paired Art Computer. With a display grant it
+ * seals `displayPlaylist` under the grant's keys and sends it over relay v2;
+ * with a relayer session it POSTs the playlist to the legacy relayer's
+ * `/api/cast`. The credential never leaves this origin's storage; `session`
+ * names the pairing this page obtained.
  */
 export async function displayDp1Playlist(options: DisplayDp1PlaylistOptions): Promise<void> {
+  const { session } = options;
+  if (session.kind === "relayerSession") {
+    return castWithRelayerSession(options, session);
+  }
+  return castWithDisplayGrant(options, session);
+}
+
+async function castWithDisplayGrant(options: DisplayDp1PlaylistOptions, session: DisplayGrantSession): Promise<void> {
   const origin = currentOrigin();
   const record = await readStoredDisplayGrant(origin);
   if (record === undefined) {
@@ -171,7 +200,7 @@ export async function displayDp1Playlist(options: DisplayDp1PlaylistOptions): Pr
   // The page casts only with the pairing it obtained: a stale page must not
   // cast to whatever FF1 another tab has paired with since, and the newer
   // grant is left alone (not session_rejected, which would clear it).
-  if (record.ctl !== options.session.ctl || record.deviceId !== options.session.deviceId) {
+  if (record.ctl !== session.ctl || record.deviceId !== session.deviceId) {
     throw new DisplayError(pairingReplacedMessage, "display_failed");
   }
   const req = { intent: { action: "now_display" }, dp1_call: options.playlist };
@@ -226,6 +255,128 @@ export async function displayDp1Playlist(options: DisplayDp1PlaylistOptions): Pr
 }
 
 /**
+ * The legacy relayer's answer to a cast for a topic with no device socket:
+ * `400 {"error":{"id":1003}}`. An FF1 that moved to FF OS with display grants
+ * (the topic is inert there) and an old FF1 that is powered off look the same.
+ */
+const relayerNoDeviceErrorId = 1003;
+
+async function readJson(response: Response): Promise<unknown> {
+  try {
+    return await response.json() as unknown;
+  } catch {
+    // Never surface the parse error: a SyntaxError quotes the body.
+    return undefined;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function relayerErrorId(body: unknown): unknown {
+  return isRecord(body) && isRecord(body["error"]) ? body["error"]["id"] : undefined;
+}
+
+/** The relayer wraps the FF1's reply as `{ok}` or `{message: {ok}}`. */
+function relayerOk(value: unknown): boolean | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  if (typeof value["ok"] === "boolean") {
+    return value["ok"];
+  }
+  return "message" in value ? relayerOk(value["message"]) : undefined;
+}
+
+/**
+ * The 0.4 cast, for a session older firmware minted: one HTTPS POST to the
+ * legacy relayer with the session token as bearer.
+ */
+async function castWithRelayerSession(options: DisplayDp1PlaylistOptions, session: RelayerSession): Promise<void> {
+  const origin = currentOrigin();
+  const stored = readStoredRelayerSession(origin);
+  if (stored === undefined) {
+    throw new DisplayError("no browser session is stored for this site", "session_rejected");
+  }
+  if (stored.sessionId !== session.sessionId) {
+    throw new DisplayError(pairingReplacedMessage, "display_failed");
+  }
+  const relayerBaseUrl = stored.relayerBaseUrl ?? options.relayerBaseUrl;
+  if (relayerBaseUrl === undefined || relayerBaseUrl.trim().length === 0) {
+    throw new Error("relayer base URL is required");
+  }
+  const castUrl = new URL("/api/cast", new URL(relayerBaseUrl).toString().replace(/\/$/, ""));
+  const fetcher = options.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
+  const req = { intent: { action: "now_display" }, dp1_call: options.playlist };
+  // One deadline, as for a grant's cast, over the request, its retry and the
+  // body read. Each step races it, so a fetch that ignores the abort signal
+  // still cannot hold the cast past it.
+  const controller = new AbortController();
+  const timedOut = (): DisplayError => new DisplayError("the relayer did not answer in time", "display_failed");
+  const pastDeadline = (): boolean => controller.signal.aborted;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(timedOut());
+    }, options.timeoutMs ?? castDeadline(req));
+  });
+  deadline.catch(() => undefined);
+  const beforeDeadline = <T>(step: Promise<T>): Promise<T> => Promise.race([step, deadline]);
+  const init: RequestInit = {
+    method: "POST",
+    headers: { authorization: `Bearer ${stored.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ command: "displayPlaylist", request: req }),
+    signal: controller.signal
+  };
+  let response: Response;
+  let body: unknown;
+  try {
+    try {
+      response = await beforeDeadline(fetcher(castUrl, init));
+    } catch (error) {
+      if (pastDeadline()) {
+        throw timedOut();
+      }
+      // A page returning to the foreground can lose its first request to a
+      // network that is still waking up. One retry covers that; a second
+      // failure is real. Re-sending is safe: the cast replaces what is showing.
+      if (!(error instanceof TypeError)) {
+        throw error;
+      }
+      try {
+        response = await beforeDeadline(fetcher(castUrl, init));
+      } catch {
+        if (pastDeadline()) {
+          throw timedOut();
+        }
+        throw new DisplayError("the relayer is unreachable", "display_failed");
+      }
+    }
+    if (response.status === 401 || response.status === 403) {
+      removeStoredRelayerSession(origin, stored.sessionId);
+      throw new DisplayError("browser session rejected", "session_rejected");
+    }
+    body = await beforeDeadline(readJson(response));
+  } finally {
+    clearTimeout(timer);
+  }
+  if (response.status === 400 && relayerErrorId(body) === relayerNoDeviceErrorId) {
+    // Never cleared here: an old FF1 that is only offline answers the same,
+    // and its session still works once it is back. Only the visitor's
+    // "Pair again?" clears it.
+    throw new DisplayError(relayerUnreachableMessage, "device_unrecognized");
+  }
+  if (!response.ok) {
+    throw new DisplayError(`display request failed: ${String(response.status)}`, "display_failed");
+  }
+  if (relayerOk(body) === false) {
+    throw new DisplayError("FF1 rejected display request", "display_rejected");
+  }
+}
+
+/**
  * Best-effort self-revoke of a grant with the keys in `record`, whether or
  * not it is still the stored one. A failed revoke is acceptable: the owner
  * can remove the row under Paired sites.
@@ -240,11 +391,14 @@ export async function revokeDisplayGrant(record: StoredDisplayGrant, ctr: number
 
 /**
  * Unpairs this site from its Art Computer: sends a best-effort self-revoke
- * with the stored keys, then deletes the grant and keys. The next display request pairs
- * again.
+ * with the stored keys, then deletes the grant and keys. A relayer session is
+ * only forgotten: the browser cannot revoke it, and it stays under Paired
+ * sites until it expires or the owner removes it. The next display request
+ * pairs again.
  */
 export async function unpairArtComputer(options: { socketFactory?: SocketFactory } = {}): Promise<void> {
   const origin = currentOrigin();
+  removeStoredRelayerSession(origin);
   const record = await readStoredDisplayGrant(origin);
   if (record === undefined) {
     return;
