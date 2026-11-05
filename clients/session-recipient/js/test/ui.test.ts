@@ -280,6 +280,12 @@ describe("pairing dialog copy", () => {
     expect(pairingErrorMessage(new PlayError("browser session rejected", "session_rejected"))).toContain("Pair again");
     expect(pairingErrorMessage(new Error("channel create failed: 429"))).toBe("channel create failed: 429");
   });
+
+  it("names a display refusal and shows display failures as the library words them", () => {
+    expect(pairingErrorMessage(new PlayError("FF1 rejected display request", "display_rejected"))).toBe("Your Art Computer refused the playlist.");
+    const unreachable = "Could not reach your Art Computer. Check that it is on and connected to the internet, then try again.";
+    expect(pairingErrorMessage(new PlayError(unreachable, "display_failed"))).toBe(unreachable);
+  });
 });
 
 describe("layout detection", () => {
