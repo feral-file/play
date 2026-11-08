@@ -6,6 +6,13 @@
 npm i @feralfile/display
 ```
 
+With a bundler, import the package entry. Without one, import the self-contained
+bundle the package ships as `dist/display.js`: copy it next to your pages, or load
+it from a CDN (`https://cdn.jsdelivr.net/npm/@feralfile/display@0.6.0/dist/display.js`;
+`unpkg.com` serves the same file for the bare package URL). `dist/index.js` imports
+`jose` and `qrcode-generator` by bare specifier, so a browser given it directly
+fails with "Failed to resolve module specifier \"jose\"".
+
 The published package ships compiled ESM + type declarations from `dist/` (`npm run build`). Source stays TypeScript-first in `src/`.
 
 Browser runtimes check IndexedDB (database `ff-play`, a name kept so stored grants survive the rename; store `displayGrants`, keyed by the current website origin) for an existing display grant. If one is missing or expired, `requestEphemeralSession` generates fresh non-extractable P-256 keys, creates a Mint Pairing Broker channel as the browser (`creatorRole: "browser"`, with the origin from `window.location.origin`, which the broker checks against the `Origin` header the browser sets), hands the visitor the app link `https://link.feralfile.com/pair?channel=<id>&token=<pairingToken>` and a six-digit code through `onPairingMaterial`, and polls until the visitor's Art Computer joins the channel. It then sends an end-to-end encrypted `mint_request` carrying the public keys to the joined device's key, polls for the encrypted result, validates the channel binding, stores the grant with its keys and request counter as one IndexedDB record, and returns the pairing metadata. `displayDp1Playlist` seals a `displayPlaylist` command under those keys and sends it over relay v2 (`wss://<relayV2Endpoint>/v2/channels/<deviceId>/connections`), opening a socket per cast and closing it right after, without exposing the envelope to website code. See [Sequential Flow](../../../docs/sequential-flow.md) for the end-to-end model.
