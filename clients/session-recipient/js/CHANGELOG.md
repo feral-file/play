@@ -6,8 +6,8 @@ One release for every Art Computer in the field.
 
 - **A browser-ready entry.** The self-contained bundle (`dist/display.js`,
   the file every release attaches) is now reachable from the package: the
-  `./display.js` subpath export and the `browser`, `unpkg` and `jsdelivr`
-  fields point at it, so `https://unpkg.com/@feralfile/display` and
+  `./display.js` subpath export (typed from `index.d.ts`) and the `unpkg` and
+  `jsdelivr` fields point at it, so `https://unpkg.com/@feralfile/display` and
   `https://cdn.jsdelivr.net/npm/@feralfile/display/dist/display.js` load in a
   page with no build step. The package entry `dist/index.js` still imports
   `jose` and `qrcode-generator` by bare specifier and needs a bundler; the

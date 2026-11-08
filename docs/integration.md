@@ -64,7 +64,8 @@ receives the playlist over HTTPS and forwards it to the FF1.
   host it next to your pages and
   `import { mountDisplayOnArtComputerButton } from "./display.js"`, or import it
   straight from a CDN, `https://cdn.jsdelivr.net/npm/@feralfile/display@0.6.0/dist/display.js`
-  (`unpkg.com` and `esm.sh` resolve the package to the same bundle). The
+  (`https://unpkg.com/@feralfile/display` serves the same file; `esm.sh`
+  instead bundles the package entry on the fly, which also works). The
   package entry, `dist/index.js`, imports its dependencies (`jose`,
   `qrcode-generator`) by bare specifier and needs a bundler; a browser given it
   directly fails with "Failed to resolve module specifier \"jose\"".

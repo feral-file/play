@@ -9,7 +9,8 @@ npm i @feralfile/display
 With a bundler, import the package entry. Without one, import the self-contained
 bundle the package ships as `dist/display.js`: copy it next to your pages, or load
 it from a CDN (`https://cdn.jsdelivr.net/npm/@feralfile/display@0.6.0/dist/display.js`;
-`unpkg.com` serves the same file for the bare package URL). `dist/index.js` imports
+`unpkg.com` serves the same file for the bare package URL; `esm.sh` bundles the
+package entry on the fly instead). `dist/index.js` imports
 `jose` and `qrcode-generator` by bare specifier, so a browser given it directly
 fails with "Failed to resolve module specifier \"jose\"".
 
