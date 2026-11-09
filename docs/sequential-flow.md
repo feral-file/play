@@ -148,8 +148,9 @@ code, waits for the Art Computer to join, establishes an end-to-end encrypted
 channel with the token minter, submits a mint request containing origin,
 browser/client metadata and the grant's public keys, receives the encrypted
 grant, stores it with its keys and request counter in origin-scoped IndexedDB,
-and uses those keys only to seal `displayPlaylist` envelopes for relay v2. It
-does not receive API keys or topic-management authority.
+and uses those keys to seal relay v2 playlist casts, read-only screen rotation
+queries, and self-revocation. It does not receive API keys or topic-management
+authority.
 
 ### Ephemeral Token Minter
 

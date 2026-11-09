@@ -191,11 +191,18 @@ npm run bundle
 casts against a stub relay v2 channel with a stub FF1 that opens every
 envelope with the fixture device keys.
 
+## Read screen rotation
+
+After pairing, call `getDeviceStatus({ session })` to read `screenRotation`
+from a verified relay v2 reply. It returns `landscape`, `portrait`,
+`landscapeReverse`, or `portraitReverse`. A legacy relayer session or FF OS
+that refuses the query raises `device_unsupported`.
+
 ## Boundaries
 
 - Keep a grant's private keys non-extractable and only in origin-scoped IndexedDB, together with the grant and its request counter.
 - Keep a relayer session's token only in origin-scoped `localStorage`; never return it from the public API or put it in a thrown error.
 - Do not expose key material or the pairing token through logs, thrown errors, analytics, or public callbacks. The one exception is the channel's pairing token inside the app link, which `onPairingMaterial` hands over because the visitor has to open or scan it; it is single-use and dies with the channel.
-- A grant seals only `displayPlaylist` in the Play shape (the FF1 control protocol's name for that command form) and its own `revokeController`; the FF1 refuses everything else with `permission_denied`.
+- A grant can cast `displayPlaylist` in the Play shape, read screen rotation with `getDeviceStatus` over relay v2, and revoke itself with `revokeController`.
 - Connect to relay v2 per cast and close at once; never hold an idle socket.
 - Keep API names requester-oriented rather than tied to a specific website.

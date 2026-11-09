@@ -23,6 +23,11 @@ Once the Art Computer joins, the page sends requester metadata and its fresh dis
 
 If a stored grant already exists, the page skips pairing and sends the DP1 payload directly. **Forget** calls `unpairArtComputer()`: a best-effort self-revoke on the Art Computer, then the grant is deleted.
 
+After approval, click **Check device status** to see the current screen
+rotation. Rotate the screen from the Feral File app and click **Check device
+status** again to verify that the browser gets the updated value. This query
+requires FF OS with browser status support.
+
 ## Delivered Grant Payload
 
 The decrypted broker result is expected to be a `mint_succeeded` payload containing a top-level `displayGrant` with `ctl`, the FF1's `profile`, `relayV2Endpoint` and an optional expiry. An Art Computer on FF OS without display grants answers with a `session` instead, which the library discards with `device_unsupported`.
