@@ -58,13 +58,19 @@ receives the playlist over HTTPS and forwards it to the FF1.
 - The requester library: [`@feralfile/display`](https://www.npmjs.com/package/@feralfile/display)
   (`npm i @feralfile/display`), source in this repo at
   [`clients/session-recipient/js`](../clients/session-recipient/js). For a
-  site with no build step, download `display.js` from the
-  [latest release](https://github.com/feral-file/play/releases/latest) — a
-  self-contained ESM bundle — host it next to your pages, and
-  `import { mountDisplayOnArtComputerButton } from "./display.js"`. A CDN import
-  (`https://esm.sh/@feralfile/display`) also works for quick experiments, but
-  self-hosting keeps your integration free of infrastructure that neither of
-  us operates.
+  site with no build step, use the self-contained ESM bundle the package ships
+  as `dist/display.js` (also attached to every
+  [release](https://github.com/feral-file/play/releases/latest) as `display.js`):
+  host it next to your pages and
+  `import { mountDisplayOnArtComputerButton } from "./display.js"`, or import it
+  straight from a CDN, `https://cdn.jsdelivr.net/npm/@feralfile/display@0.6.0/dist/display.js`
+  (`https://unpkg.com/@feralfile/display` serves the same file; `esm.sh`
+  instead bundles the package entry on the fly, which also works). The
+  package entry, `dist/index.js`, imports its dependencies (`jose`,
+  `qrcode-generator`) by bare specifier and needs a bundler; a browser given it
+  directly fails with "Failed to resolve module specifier \"jose\"".
+  Self-hosting keeps your integration free of infrastructure that neither of us
+  operates.
 - A [DP-1](https://github.com/display-protocol/dp1) playlist document for the
   works the visitor selected. DP-1 is an open spec; each playlist item points
   at a URL the FF1 can render (artwork pages, media files, generative works).

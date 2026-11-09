@@ -10,8 +10,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./display.js": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/display.js"
     }
   },
+  "unpkg": "./dist/display.js",
+  "jsdelivr": "./dist/display.js",
   "files": [
     "dist",
     "README.md"
