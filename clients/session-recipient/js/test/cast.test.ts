@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { displayDp1Playlist, unpairArtComputer } from "../src/cast.js";
+import { displayDp1Playlist, getDeviceStatus, unpairArtComputer } from "../src/cast.js";
 import { ephemeralBrowserSessionStorageKey, type DisplayGrantSession, type RelayerSession } from "../src/client.js";
 import { installLocalStorage, uninstallLocalStorage } from "./localStorage.js";
 import type { DisplayError } from "../src/errors.js";
@@ -29,6 +29,31 @@ async function seeded(): Promise<{ ctl: string; sig: Jwk; grants: Record<string,
   session.ctl = record.ctl;
   return { ctl: record.ctl, sig, grants: { [record.ctl]: sig } };
 }
+
+describe("getDeviceStatus over relay v2", () => {
+  it("returns only the rotation from the verified FF1 reply", async () => {
+    const { grants } = await seeded();
+    const relay = deviceOnRelay(grants, () => ({ ok: true, res: { screenRotation: "portrait", connectedWifi: "private" } }));
+    await expect(getDeviceStatus({ session, socketFactory: relay.socketFactory })).resolves.toEqual({ screenRotation: "portrait" });
+    expect(relay.ff1.seen).toHaveLength(1);
+    expect(relay.ff1.seen[0]).toMatchObject({ cmd: "getDeviceStatus", req: {}, ctr: 1 });
+    expect(relay.sockets[0]?.closed).toBe(true);
+  });
+
+  it("keeps the grant when older FF OS refuses the query", async () => {
+    const { grants } = await seeded();
+    const relay = deviceOnRelay(grants, () => ({ ok: false, code: "permission_denied" }));
+    await expect(getDeviceStatus({ session, socketFactory: relay.socketFactory })).rejects.toMatchObject({ code: "device_unsupported" });
+    expect(await readStoredDisplayGrant(testOrigin)).toBeDefined();
+  });
+
+  it("rejects a legacy session before opening a relay connection", async () => {
+    const socketFactory = vi.fn();
+    const legacy: RelayerSession = { kind: "relayerSession", sessionId: "legacy", persistent: true };
+    await expect(getDeviceStatus({ session: legacy, socketFactory })).rejects.toMatchObject({ code: "device_unsupported" });
+    expect(socketFactory).not.toHaveBeenCalled();
+  });
+});
 
 describe("displayDp1Playlist over relay v2", () => {
   it("seals displayPlaylist in the Play shape under the stored keys, fans it out, and closes the socket", async () => {

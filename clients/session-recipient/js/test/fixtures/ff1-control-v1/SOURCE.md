@@ -6,7 +6,8 @@ These files are a verbatim copy of
 85 JSON files: keys.json, 20 positive and 64 negative. `keys.json` carries a
 `controllers.display` key (role `display`, platform `web`, an origin) and the
 `cmd-display-*` / `display-*` vectors exercise it; their `setup.displayGrants`
-lists the display records the device holds.
+lists the display records the device holds. These vectors predate relay v2
+browser status support, which is covered in `test/cast.test.ts`.
 
 The normative spec is `docs/ff1-control-v1.md` in the same commit; §12 defines
 the fixture format. The Go generator is

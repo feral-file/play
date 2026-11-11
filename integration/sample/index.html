@@ -67,14 +67,24 @@
         <div>
           <span class="block text-xs font-semibold uppercase tracking-normal text-neutral-500">Status</span>
           <p id="message" class="mt-2 text-sm font-medium leading-6 text-neutral-300"></p>
+          <button
+            id="check-device-status"
+            type="button"
+            class="mt-5 h-10 rounded-md border border-neutral-700 px-4 text-sm font-semibold text-neutral-200 hover:bg-neutral-800 disabled:opacity-50"
+          >
+            Check device status
+          </button>
+          <p id="device-status" class="mt-2 text-sm text-neutral-300"></p>
         </div>
       </aside>
     </main>
 
     <script type="module">
       import {
+        getDeviceStatus,
         hasStoredEphemeralBrowserSession,
         mountDisplayOnArtComputerButton,
+        readStoredEphemeralBrowserSession,
         unpairArtComputer
       } from "@feralfile/display";
 
@@ -84,6 +94,8 @@
       const forgetButton = mustElement("forget-session");
       const sessionStatus = mustElement("session-status");
       const message = mustElement("message");
+      const checkStatusButton = mustElement("check-device-status");
+      const deviceStatus = mustElement("device-status");
 
       function mustElement(id) {
         const element = document.getElementById(id);
@@ -152,7 +164,30 @@
 
       mountDisplayButton();
 
+      checkStatusButton.addEventListener("click", async () => {
+        checkStatusButton.disabled = true;
+        forgetButton.disabled = true;
+        deviceStatus.textContent = "Checking…";
+        try {
+          const session = await readStoredEphemeralBrowserSession(window.location.origin);
+          if (session?.kind !== "displayGrant") {
+            deviceStatus.textContent = "Pair with a relay v2 Art Computer first.";
+            return;
+          }
+          const status = await getDeviceStatus({ session });
+          deviceStatus.textContent = `Screen rotation: ${status.screenRotation}`;
+        } catch (error) {
+          deviceStatus.textContent = error instanceof Error ? error.message : "Could not read device status.";
+        } finally {
+          checkStatusButton.disabled = false;
+          forgetButton.disabled = false;
+          updateSessionStatus();
+        }
+      });
+
       forgetButton.addEventListener("click", () => {
+        checkStatusButton.disabled = true;
+        deviceStatus.textContent = "";
         forgetButton.disabled = true;
         // Tells the Art Computer first (best effort), then forgets the grant.
         unpairArtComputer().then(() => {
@@ -161,6 +196,7 @@
           setMessage(error instanceof Error ? error.message : "Could not unpair.");
         }).finally(() => {
           forgetButton.disabled = false;
+          checkStatusButton.disabled = false;
           updateSessionStatus();
         });
       });

@@ -28,6 +28,12 @@ export type DisplayDp1PlaylistOptions = {
   fetchImpl?: typeof fetch;
 };
 
+export type GetDeviceStatusOptions = Pick<DisplayDp1PlaylistOptions, "session" | "timeoutMs" | "socketFactory">;
+
+export type DisplayDeviceStatus = Readonly<{
+  screenRotation: "landscape" | "portrait" | "landscapeReverse" | "portraitReverse";
+}>;
+
 const defaultTimeoutMs = 30_000;
 /** Shown as-is by the wrapped button: the one display_failed a visitor can act on by waiting. */
 export const tooManyCastsMessage = "Too many casts at once from this network, or the relay is unreachable. Try again in a moment.";
@@ -184,10 +190,39 @@ export async function displayDp1Playlist(options: DisplayDp1PlaylistOptions): Pr
   if (session.kind === "relayerSession") {
     return castWithRelayerSession(options, session);
   }
-  return castWithDisplayGrant(options, session);
+  const req = { intent: { action: "now_display" }, dp1_call: options.playlist };
+  const result = await runDisplayGrantCommand(session, "displayPlaylist", req, options.timeoutMs ?? castDeadline(req), options.socketFactory);
+  if (resOk(result) === false) {
+    throw new DisplayError("FF1 rejected display request", "display_rejected");
+  }
 }
 
-async function castWithDisplayGrant(options: DisplayDp1PlaylistOptions, session: DisplayGrantSession): Promise<void> {
+/** Reads the paired Art Computer's screen rotation over relay v2. */
+export async function getDeviceStatus(options: GetDeviceStatusOptions): Promise<DisplayDeviceStatus> {
+  if (options.session.kind !== "displayGrant") {
+    throw new DisplayError("reading status requires a relay v2 display grant", "device_unsupported");
+  }
+  const result = await runDisplayGrantCommand(options.session, "getDeviceStatus", {}, options.timeoutMs ?? defaultTimeoutMs, options.socketFactory);
+  const screenRotation = (result as { screenRotation?: unknown } | null | undefined)?.screenRotation;
+  switch (screenRotation) {
+    case "landscape":
+    case "portrait":
+    case "landscapeReverse":
+    case "portraitReverse":
+      return { screenRotation };
+    default:
+      throw new DisplayError("FF1 returned an invalid screen rotation", "display_failed");
+  }
+}
+
+async function runDisplayGrantCommand(
+  session: DisplayGrantSession,
+  command: "displayPlaylist" | "getDeviceStatus",
+  req: Record<string, unknown>,
+  timeoutMs: number,
+  socketFactory: SocketFactory | undefined
+): Promise<unknown> {
+  const requestName = command === "displayPlaylist" ? "display request" : "status request";
   const origin = currentOrigin();
   const record = await readStoredDisplayGrant(origin);
   if (record === undefined) {
@@ -197,13 +232,12 @@ async function castWithDisplayGrant(options: DisplayDp1PlaylistOptions, session:
     await deleteStoredDisplayGrant(origin, record.ctl);
     throw new DisplayError("the display grant has expired", "session_rejected");
   }
-  // The page casts only with the pairing it obtained: a stale page must not
-  // cast to whatever FF1 another tab has paired with since, and the newer
+  // A stale page must not send commands to the FF1 another tab has
+  // paired with since, and the newer
   // grant is left alone (not session_rejected, which would clear it).
   if (record.ctl !== session.ctl || record.deviceId !== session.deviceId) {
     throw new DisplayError(pairingReplacedMessage, "display_failed");
   }
-  const req = { intent: { action: "now_display" }, dp1_call: options.playlist };
   const reserve = async (): Promise<number> => {
     const reserved = await reserveCounter(origin, 1, record.ctl);
     if (reserved === undefined) {
@@ -213,7 +247,7 @@ async function castWithDisplayGrant(options: DisplayDp1PlaylistOptions, session:
     }
     return reserved.ctr;
   };
-  const outcome = await sendCommand(record, "displayPlaylist", req, reserve, options.timeoutMs ?? castDeadline(req), options.socketFactory);
+  const outcome = await sendCommand(record, command, req, reserve, timeoutMs, socketFactory);
   if (outcome.kind === "failed") {
     if (outcome.unrecognized) {
       throw new DisplayError("the FF1 no longer recognizes this site's pairing", "device_unrecognized");
@@ -227,19 +261,20 @@ async function castWithDisplayGrant(options: DisplayDp1PlaylistOptions, session:
     if (outcome.error instanceof RelayUndeliveredError) {
       throw new DisplayError("the FF1 is offline", "display_failed");
     }
-    throw new DisplayError(`display request failed: ${outcome.error.message}`, "display_failed");
+    throw new DisplayError(`${requestName} failed: ${outcome.error.message}`, "display_failed");
   }
   const { claims } = outcome;
   if (claims.ok) {
-    if (resOk(claims.res) === false) {
-      throw new DisplayError("FF1 rejected display request", "display_rejected");
-    }
-    return;
+    return claims.res;
   }
   switch (claims.code) {
-    case "command_failed":
     case "permission_denied":
-      throw new DisplayError("FF1 rejected display request", "display_rejected");
+      if (command === "getDeviceStatus") {
+        throw new DisplayError("this Art Computer does not allow browser status queries", "device_unsupported");
+      }
+      throw new DisplayError(`FF1 rejected ${requestName}`, "display_rejected");
+    case "command_failed":
+      throw new DisplayError(`FF1 rejected ${requestName}`, "display_rejected");
     case "access_revoked":
     case "expired":
       await deleteStoredDisplayGrant(origin, record.ctl);
@@ -250,7 +285,7 @@ async function castWithDisplayGrant(options: DisplayDp1PlaylistOptions, session:
       await reserveCounter(origin, replayCounterJump, record.ctl);
       throw new DisplayError("the FF1 reported a replayed request", "display_failed");
     default:
-      throw new DisplayError(`the FF1 refused the display request (${claims.code ?? "unknown"})`, "display_failed");
+      throw new DisplayError(`the FF1 refused the ${requestName} (${claims.code ?? "unknown"})`, "display_failed");
   }
 }
 
